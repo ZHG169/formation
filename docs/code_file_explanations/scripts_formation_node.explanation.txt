@@ -1,0 +1,26 @@
+對應檔案：scripts/formation_node
+
+這份檔案的角色：
+這是 ROS 2 可執行入口 wrapper。它通常很短，目的只是讓 `ros2 run formation formation_node` 可以找到並執行真正的 Python module：formation/main_node.py。
+
+主要寫法：
+一般會包含：
+- shebang：#!/usr/bin/env python3
+- import main：from formation.main_node import main
+- if __name__ == '__main__': main()
+
+重要細節：
+- 它本身不放控制邏輯。
+- 要有 executable 權限，且 CMakeLists.txt install(PROGRAMS ...) 要包含它。
+
+常見調整方向：
+通常不用改。真正要改 formation 行為，去改 formation/main_node.py。
+
+目前檔案實際內容：
+#!/usr/bin/env python3
+
+from formation.main_node import main
+
+
+if __name__ == '__main__':
+    main()

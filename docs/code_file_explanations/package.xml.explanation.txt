@@ -1,0 +1,32 @@
+對應檔案：package.xml
+
+這份檔案的角色：
+這是 ROS 2 package 的套件描述檔。它描述 package 名稱、版本、維護者、license，以及最重要的 dependency。colcon build 會參考它來知道建置與執行時需要哪些 ROS 套件。
+
+主要寫法：
+1. <name>formation</name>
+   定義 package 名稱，所以後面才可以使用：
+   - `ros2 run formation ...`
+   - `ros2 launch formation ...`
+   - `from formation.msg import ...`
+
+2. buildtool_depend
+   通常包含 ament_cmake，表示這個 package 用 ament_cmake 建置。
+
+3. depend / build_depend / exec_depend
+   這些是程式需要的套件，例如：
+   - rclpy：Python ROS 2 node
+   - std_srvs：Trigger service
+   - px4_msgs：PX4 topic message
+   - rosidl_default_runtime：自訂 msg/srv 執行期需要
+
+4. member_of_group rosidl_interface_packages
+   如果 package 產生 ROS interface，通常需要標示它屬於 rosidl interface package。
+
+重要細節：
+- 如果 Python 程式 import 了某個 ROS 套件，但 package.xml 沒有宣告，可能在你的電腦能跑，換環境就失敗。
+- px4_msgs 版本要跟 PX4 v1.17 對應，否則 topic 型別可能不一致。
+
+常見調整方向：
+- 新增 `from std_msgs.msg import ...` 就確認 package.xml 有 std_msgs。
+- 新增 action/msg/srv 型別時，要補 dependency。

@@ -1,0 +1,31 @@
+對應檔案：srv/SetFormation.srv
+
+這份檔案的角色：
+這是修改編隊形狀與間距的 ROS 2 service 介面。main_node 建立 `/formation/set_formation`，地面端可以在任務中切換 triangle/line/v_shape/column 或 spacing。
+
+主要寫法：
+request 通常包含：
+- formation_type
+- spacing
+response 通常包含：
+- success
+- message
+
+使用概念：
+`ros2 service call /formation/set_formation formation/srv/SetFormation "{formation_type: 'line', spacing: 2.0}"`
+main_node callback 會呼叫 formation_controller.set_formation()，再由 formation_shapes.py 驗證形狀與 spacing。
+
+重要細節：
+- spacing 太小容易撞，太大會讓編隊距離看起來很大。
+- 切換形狀時，如果新 setpoint 跳太遠，position mode 可能觸發 setpoint jump；velocity CPF mode 則主要看速度限制。
+
+常見調整方向：
+- 想讓切隊形更平順：可以在 formation_controller 加 transition/slew rate，而不是瞬間換 target。
+
+目前檔案實際內容：
+string formation_type
+float32 spacing
+string control_mode
+---
+bool success
+string message

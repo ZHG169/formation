@@ -1,0 +1,6 @@
+string formation_type
+float32 spacing
+string control_mode
+---
+bool success
+string message

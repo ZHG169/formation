@@ -1,0 +1,47 @@
+對應檔案：formation/formation_shapes.py
+
+這份檔案的角色：
+這裡定義編隊形狀，也就是每台 UAV 相對於 leader/reference 的 offset。它不管 PX4、不管 ROS topic，只負責回傳幾何位置。
+
+主要寫法：
+1. _validate_spacing(spacing)
+   確認 spacing 大於 0。spacing 是編隊間距，太小會容易撞，太大會讓直線編隊看起來距離很遠。
+
+2. triangle(spacing)
+   回傳三角形 offset：
+   - 第 1 台：VectorENU(0, 0, 0)
+   - 第 2 台：VectorENU(-spacing, spacing, 0)
+   - 第 3 台：VectorENU(-spacing, -spacing, 0)
+   這代表 leader/reference 在前方，兩台 follower 在後方左右。
+
+3. line(spacing)
+   目前是原本的 line 模式：
+   - 第 1 台：VectorENU(0, 0, 0)
+   - 第 2 台：VectorENU(-spacing, 0, 0)
+   - 第 3 台：VectorENU(-2*spacing, 0, 0)
+   所以如果 spacing=4，三台會排成 0m、-4m、-8m，整條線會很長。這就是你問「為何直線距離很大」最直接的原因。
+
+4. v_shape(spacing)
+   目前和 triangle 幾何很接近，都是後方左右展開。
+
+5. column(spacing)
+   目前是沿 north 方向排列：0、spacing、2*spacing。
+
+6. get_shape(name, spacing, vehicle_ids, leader_id)
+   這是外部主要呼叫點。
+   - 先選形狀函式
+   - 檢查 leader 是否在 vehicle_ids
+   - 檢查車輛數量不要超過 shape 支援數量
+   - 排序：leader 放第一個，其他 ID 由小到大
+   - 回傳 `{vehicle_id: offset}`
+
+重要細節：
+- 目前 line 模式不是「依照起飛時相對位置自動左右排列」，而是 leader 第一、其他 ID 排序。
+- 如果你指定 leader=1，line 會變成 1、2、3。
+- 如果你指定 leader=3，line 會變成 3、1、2，因為 leader 優先，其他照 ID 排序。
+- 你之前提過不想要太刻意排序；後來要求拿掉，所以目前已回到這種簡單原本 line 邏輯。
+
+常見調整方向：
+- 直線距離太大：調小 `formation_spacing`，例如 2.0 或 1.5。
+- 想要左右對稱 line：可以把 line offset 改成 `[0, +spacing, -spacing]`，但這會改變目前邏輯。
+- 想支援更多台 UAV，需要增加 offset 數量。

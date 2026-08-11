@@ -1,0 +1,57 @@
+對應檔案：formation/cpf_avoidance.py
+
+這份檔案的角色：
+這是 Control Potential Field，簡稱 CPF，負責 UAV 間避障。它的概念是：目標點對飛機有吸引力，其他 UAV 對飛機有排斥力，最後兩者相加得到速度命令 v_cmd。
+
+主要寫法：
+1. CpfConfig dataclass
+   儲存 CPF 參數：
+   - enabled：是否啟用
+   - attraction_gain：吸引力比例，越大越急著追目標
+   - repulsion_gain：排斥力比例，越大越積極遠離其他 UAV
+   - safe_distance：安全距離，低於這個距離排斥會更強
+   - influence_distance：避障作用範圍，超過就不管
+   - max_speed：CPF 輸出速度上限
+   - output_velocity：是否輸出 velocity setpoint
+
+2. vector 工具函式
+   - add_vectors
+   - subtract_vectors
+   - vector_norm
+   - horizontal_norm
+   - scale_vector
+   - limit_vector
+   這些是 CPF 計算需要的基本向量運算。
+
+3. world_position(state, origin)
+   把單台 UAV 的 local ENU 位置轉成共同 world ENU：
+   `world = origin + local`
+   因為三台 PX4 各有自己的 local frame，避障距離必須在共同 world frame 比較。
+
+4. attractive_velocity(current_world, target_world, gain)
+   往目標點移動的速度：
+   `v_formation = kp * (target - current)`
+   這不是完整 PID，而是簡單 P controller。
+
+5. repulsive_velocity(current_world, other_world, config)
+   如果其他 UAV 在 influence_distance 內，就產生遠離對方的速度。越接近 safe_distance，排斥越大。
+
+6. apply_cpf_to_setpoints(states, setpoints, vehicle_origins, config)
+   這是主要入口：
+   - 先檢查 CPF 是否 enabled
+   - 對每台 UAV 算 current_world
+   - 算 attraction：往自己的 formation target 靠近
+   - 算 repulsion：避開其他 UAV
+   - v_cmd = v_formation + v_avoid
+   - 限制 v_cmd 不超過 cpf_max_speed
+   - 若 output_velocity=True，回傳帶 velocity_local_enu 的 VehicleSetpoint
+
+重要細節：
+- CPF 不會規劃「先前進 100m 再左轉 100m」這種固定路徑。它是每一個 control loop 根據現在位置即時計算速度。
+- CPF velocity mode 下，PX4 主要看 TrajectorySetpoint.velocity，不是 position。
+- 如果 attraction 太大，飛機會急著回隊形，可能互相穿越；如果 repulsion 太小，避障不夠；如果 repulsion 太大，可能抖動或速度超限。
+
+常見調整方向：
+- 容易撞：提高 cpf_safe_distance、cpf_influence_distance、cpf_repulsion_gain，或降低 cpf_attraction_gain。
+- 速度超限：降低 cpf_max_speed、cpf_attraction_gain、cpf_repulsion_gain。
+- 編隊收斂太慢：提高 cpf_attraction_gain 或 cpf_max_speed，但要搭配 safety。

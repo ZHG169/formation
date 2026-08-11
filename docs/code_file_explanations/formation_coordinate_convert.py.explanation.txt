@@ -1,0 +1,45 @@
+對應檔案：formation/coordinate_convert.py
+
+這份檔案的角色：
+這是座標轉換工具。你的高階控制與 Gazebo/ROS 端採用 ENU，比較直覺：East、North、Up。PX4 Offboard 的 TrajectorySetpoint 則採用 NED：North、East、Down。因此任何送進 PX4 的位置、速度、yaw 都需要在這裡轉換。
+
+主要寫法：
+1. VectorENU dataclass
+   表示 ROS/Gazebo 習慣的 ENU 向量：
+   - east：向東，對應 ROS x
+   - north：向北，對應 ROS y
+   - up：向上，對應 ROS z
+   as_list() 回傳 [east, north, up]。
+
+2. VectorNED dataclass
+   表示 PX4 習慣的 NED 向量：
+   - north：向北
+   - east：向東
+   - down：向下
+   as_list() 回傳 [north, east, down]。
+
+3. enu_to_ned(vector)
+   核心轉換：
+   ENU(east, north, up) -> NED(north, east, down)
+   所以：
+   - NED north = ENU north
+   - NED east = ENU east
+   - NED down = - ENU up
+   例如 ENU up=3m，送給 PX4 會變成 NED down=-3m。
+
+4. ned_to_enu(vector)
+   反向轉換，PX4 回來的 local_position 如果是 NED，就轉成 ROS/Gazebo 端比較好理解的 ENU。
+
+5. yaw_enu_to_ned(yaw_enu)
+   yaw 也不是只有 z 軸正負問題。ENU yaw=0 通常面向 East，逆時針為正；NED yaw=0 面向 North，順時針為正。因此用 `pi/2 - yaw_enu` 轉換。
+
+6. yaw_ned_to_enu(yaw_ned)
+   反向轉換。公式剛好也是 `pi/2 - yaw_ned`，最後再 normalize 到 [-pi, pi]。
+
+重要細節：
+- 這個檔案本身不會造成明顯 delay，因為只是幾個加減乘除和 sin/cos。真正會造成 delay 的通常是通訊、QoS、Gazebo 負載、PX4 bridge 或控制迴圈排程。
+- 好處是把 ENU/NED 集中管理，避免整個程式到處出現 `z=-3.0` 這種容易混淆的寫法。
+
+常見調整方向：
+- 如果未來接真機，仍可保留高階控制用 ENU，再在最靠近 PX4 發布前轉 NED。
+- 如果使用 map/local_origin/vision frame，要再明確定義 world ENU 與每台 local ENU 的原點關係。

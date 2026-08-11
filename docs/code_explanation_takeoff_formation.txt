@@ -1,0 +1,969 @@
+Formation 程式碼說明文件
+建立日期：2026-08-10
+
+本文件整理目前 formation package 中，三台無人機同時起飛、leader command、集中式編隊、分散式編隊，以及撞機調整方式的程式碼邏輯。
+
+============================================================
+1. 整體架構
+============================================================
+
+目前 formation 架構分成四個主要角色：
+
+1. formation_node
+   檔案：formation/main_node.py
+   角色：地面端任務管理節點。
+   負責等待三台 UAV ready、Offboard warm-up、切 Offboard、Arm、起飛、進入編隊、降落與安全保護。
+
+2. mission_manager
+   檔案：formation/mission_manager.py
+   角色：任務狀態機。
+   負責決定現在是 IDLE、WAITING_READY、OFFBOARD_WARMUP、TAKEOFF、FORMATION、LANDING、EMERGENCY_LANDING 或 LANDED。
+
+3. leader_command_node
+   檔案：formation/leader_command_node.py
+   角色：Leader 高階命令轉發節點。
+   它接收 /formation/leader_input，補上 leader_id、leader_generation、sequence、timestamp 後，重新發布成 /formation/command。
+   注意：它不讀 PX4 的 leader 位置。
+
+4. formation_controller / distributed_vehicle_node
+   檔案：formation/formation_controller.py、formation/distributed_vehicle_node.py
+   角色：編隊 setpoint 計算。
+   集中式由地面端 formation_node 算三台 UAV 的 setpoint。
+   分散式由每台 distributed_vehicle_node 算自己的 setpoint。
+
+整體資料流如下：
+
+集中式 centralized：
+
+    /formation/leader_input
+        -> leader_command_node
+        -> /formation/command
+        -> formation_node
+        -> CentralizedFormationController
+        -> 三台 UAV setpoint
+
+分散式 distributed：
+
+    /formation/leader_input
+        -> leader_command_node
+        -> /formation/command
+        -> distributed_vehicle_1 算 MAV1 setpoint
+        -> distributed_vehicle_2 算 MAV2 setpoint
+        -> distributed_vehicle_3 算 MAV3 setpoint
+
+不論集中式或分散式：
+
+    起飛、Offboard、Arm、降落、安全異常 landing
+    都由 formation_node 統一管理。
+
+============================================================
+2. FormationCommand.msg 說明
+============================================================
+
+檔案：msg/FormationCommand.msg
+
+這是 leader command 使用的 ROS 2 message。
+
+主要欄位：
+
+    builtin_interfaces/Time stamp
+    builtin_interfaces/Time execute_at
+
+    uint8 leader_id
+    uint32 leader_generation
+    uint32 sequence
+
+    uint8 command
+
+    float32 velocity_east
+    float32 velocity_north
+    float32 velocity_up
+
+    float32 yaw_enu
+    float32 yaw_rate
+    float32 duration
+
+    string formation_type
+    float32 spacing
+
+command 類型：
+
+    HOLD = 0
+        保持目前 virtual reference，不繼續移動。
+
+    MOVE = 1
+        用 velocity_east / velocity_north / velocity_up 推動整個編隊的 virtual reference。
+
+    SET_YAW = 2
+        設定編隊 yaw。
+
+    MISSION_COMPLETE = 3
+        任務完成，要求 formation_node 讓三台 UAV 同時降落。
+
+    EMERGENCY_STOP = 4
+        緊急停止，formation_node 會進入 emergency landing。
+
+這裡的重點是：
+
+    FormationCommand 是高階命令，不是 leader position。
+
+也就是 follower 不需要讀 leader 的實際位置。
+
+============================================================
+3. leader_command_node.py 說明
+============================================================
+
+檔案：formation/leader_command_node.py
+
+這個 node 的工作是把 leader input 轉成正式 command。
+
+重要 publisher：
+
+    self.publisher = self.create_publisher(
+        FormationCommand,
+        '/formation/command',
+        10,
+    )
+
+表示它會發布 /formation/command。
+
+重要 subscription：
+
+    self.input_subscription = self.create_subscription(
+        FormationCommand,
+        '/formation/leader_input',
+        self.leader_input_callback,
+        10,
+    )
+
+表示外部可以對 /formation/leader_input 發命令。
+
+    self.status_subscription = self.create_subscription(
+        FormationStatus,
+        '/formation/status',
+        self.status_callback,
+        10,
+    )
+
+它需要讀 formation status，目的是知道目前誰是 leader，以及 leader_generation 是多少。
+
+注意：
+
+    它沒有訂閱 /MAV1/fmu/out/vehicle_local_position_v1
+    它沒有訂閱 /MAV2/fmu/out/vehicle_local_position_v1
+    它沒有訂閱 /MAV3/fmu/out/vehicle_local_position_v1
+
+所以它不會使用 leader 實際位置。
+
+status_callback 的作用：
+
+    self.active_leader_id = int(message.leader_id)
+    self.leader_generation = int(message.leader_generation)
+
+當 leader 改變或 generation 改變時，leader_command_node 會重新產生 HOLD command。
+
+leader_input_callback 的作用：
+
+    command.command = int(message.command)
+    command.velocity_east = float(message.velocity_east)
+    command.velocity_north = float(message.velocity_north)
+    command.velocity_up = float(message.velocity_up)
+    command.yaw_enu = float(message.yaw_enu)
+    command.yaw_rate = float(message.yaw_rate)
+    command.duration = float(message.duration)
+
+它會把外部輸入的 command 複製過來，再呼叫 prepare_command。
+
+prepare_command 的作用：
+
+    command.stamp = now.to_msg()
+    command.execute_at = now.to_msg()
+    command.leader_id = self.active_leader_id
+    command.leader_generation = self.leader_generation
+    command.sequence = self.sequence
+
+也就是補上 command 的身份資訊。
+
+為什麼需要 leader_generation：
+
+    假設 leader 從 MAV1 換成 MAV2，舊的 command 不能再被誤用。
+    leader_generation 可以讓 formation_node 和 distributed_vehicle_node 判斷 command 是否屬於目前這一任 leader。
+
+leader_command_node 的發布頻率建議：
+
+    20 Hz
+
+因為它發布的是高階命令，不是 PX4 Offboard setpoint。
+
+============================================================
+4. main_node.py 說明
+============================================================
+
+檔案：formation/main_node.py
+
+FormationNode 是地面端主節點。
+
+它建立三個 VehicleInterface：
+
+    self.vehicles = {
+        1: VehicleInterface(self, 'MAV1', 1),
+        2: VehicleInterface(self, 'MAV2', 2),
+        3: VehicleInterface(self, 'MAV3', 3),
+    }
+
+意思是：
+
+    vehicle_id 1 -> /MAV1/fmu/...
+    vehicle_id 2 -> /MAV2/fmu/...
+    vehicle_id 3 -> /MAV3/fmu/...
+
+control_frequency：
+
+    control_frequency = 100.0
+
+這個頻率是 formation_node 的 control loop 頻率。
+
+    self.timer = self.create_timer(
+        self.control_period,
+        self.control_loop,
+    )
+
+如果 control_frequency 是 100 Hz，control_loop 每 0.01 秒執行一次。
+
+control_loop 做的事情：
+
+1. 讀取三台 UAV 狀態
+
+    states = {
+        vehicle_id: vehicle.get_state()
+        for vehicle_id, vehicle in self.vehicles.items()
+    }
+
+2. 如果在 FORMATION 狀態，先處理 formation command
+
+    if self.mission_manager.state == MissionState.FORMATION:
+        self.process_formation_command(now_ns)
+
+3. 檢查 leader health
+
+    leader_check = self.leader_manager.check_leader(...)
+
+4. 檢查安全限制
+
+    safety_result = self.safety_manager.check_states(...)
+
+5. 更新任務狀態機
+
+    output = self.mission_manager.update(...)
+
+6. 發 Offboard heartbeat
+
+    if output.publish_offboard:
+        for vehicle in self.vehicles.values():
+            vehicle.publish_offboard_heartbeat()
+
+7. 發 setpoint
+
+    for vehicle_id, setpoint in output.setpoints.items():
+        self.vehicles[vehicle_id].publish_setpoint(setpoint)
+
+8. 切 Offboard 並 Arm
+
+    if output.set_offboard_and_arm:
+        for vehicle in self.vehicles.values():
+            vehicle.set_offboard_mode()
+        for vehicle in self.vehicles.values():
+            vehicle.arm()
+
+9. 降落
+
+    if output.land_all:
+        for vehicle in self.vehicles.values():
+            vehicle.land()
+
+所以三台同時起飛與降落，主要是在 main_node + mission_manager + vehicle_interface 一起完成。
+
+------------------------------------------------------------
+process_formation_command 說明
+------------------------------------------------------------
+
+這段是今天新增的核心邏輯。
+
+    def process_formation_command(self, now_ns):
+
+它只在 mission state 是 FORMATION 時被呼叫。
+
+第一步：檢查有沒有 command。
+
+    if self.latest_command is None:
+        return
+
+第二步：檢查 command timeout。
+
+    age_seconds = (
+        now_ns - self.last_command_receive_ns
+    ) / 1e9
+
+    if age_seconds > self.command_timeout:
+        self.mission_manager.request_fault_landing(...)
+
+意思是：
+
+    如果太久沒有收到 /formation/command，代表 leader command link 可能斷掉。
+    系統會讓三台 UAV 進入 fault landing。
+
+第三步：如果 command 是 MISSION_COMPLETE，就降落。
+
+    if command.command == FormationCommand.MISSION_COMPLETE:
+        self.mission_manager.request_land()
+
+第四步：如果 command 是 EMERGENCY_STOP，就 emergency landing。
+
+    if command.command == FormationCommand.EMERGENCY_STOP:
+        self.mission_manager.request_fault_landing(...)
+
+第五步：如果是分散式模式，main_node 不計算 formation setpoint。
+
+    if self.control_mode != 'centralized':
+        return
+
+這是分散式的重點。
+
+集中式才由 main_node 更新 controller 的 virtual reference。
+
+MOVE command：
+
+    velocity = VectorENU(
+        east=float(command.velocity_east),
+        north=float(command.velocity_north),
+        up=float(command.velocity_up),
+    )
+
+    self.controller.apply_velocity_command(
+        velocity_enu=velocity,
+        yaw_rate=float(command.yaw_rate),
+        dt_seconds=self.control_period,
+    )
+
+意思是：
+
+    command 給的是速度。
+    formation_node 每 0.01 秒把速度積分成位置。
+    這個位置是 virtual formation reference，不是 leader 實際位置。
+
+SET_YAW command：
+
+    self.controller.set_reference_yaw(float(command.yaw_enu))
+
+意思是設定整個編隊方向。
+
+============================================================
+5. mission_manager.py 說明
+============================================================
+
+檔案：formation/mission_manager.py
+
+MissionManager 是狀態機。
+
+主要狀態：
+
+    IDLE
+    WAITING_READY
+    OFFBOARD_WARMUP
+    TAKEOFF
+    FORMATION
+    LANDING
+    LANDED
+    EMERGENCY_LANDING
+    AWAITING_GROUND_CONFIRMATION
+    ERROR
+
+request_takeoff：
+
+    只有 IDLE 或 LANDED 可以起飛。
+
+    self.state = MissionState.WAITING_READY
+
+request_land：
+
+    只有 TAKEOFF 或 FORMATION 可以降落。
+
+    self.state = MissionState.LANDING
+    self.land_command_pending = True
+
+request_fault_landing：
+
+    安全異常或 command timeout 時使用。
+
+    self.state = MissionState.EMERGENCY_LANDING
+    self.fault_reason = str(reason)
+    self.land_command_pending = True
+
+update 在不同狀態的行為：
+
+WAITING_READY：
+
+    等三台 UAV 都有 status、preflight ok、local position valid。
+
+OFFBOARD_WARMUP：
+
+    持續發布 Offboard heartbeat 和 takeoff setpoint。
+    這是因為 PX4 進 Offboard 前，需要先收到一段時間的 setpoint。
+
+TAKEOFF：
+
+    發起飛高度 setpoint。
+    如果三台都到達 takeoff_height，就進入 FORMATION。
+
+FORMATION：
+
+    集中式：controller.calculate 回傳三台 setpoint。
+    分散式：DistributedFormationController.calculate 回傳空 dict，setpoint 由 distributed_vehicle_node 發。
+
+LANDING / EMERGENCY_LANDING：
+
+    反覆送 LAND command，直到三台都確認 landed。
+
+============================================================
+6. vehicle_interface.py 說明
+============================================================
+
+檔案：formation/vehicle_interface.py
+
+VehicleInterface 是 PX4 ROS 2 topic 的包裝。
+
+它建立 publisher：
+
+    /MAVx/fmu/in/offboard_control_mode
+    /MAVx/fmu/in/trajectory_setpoint
+    /MAVx/fmu/in/vehicle_command
+
+它建立 subscription：
+
+    /MAVx/fmu/out/vehicle_status_v1
+    /MAVx/fmu/out/vehicle_local_position_v1
+    /MAVx/fmu/out/vehicle_land_detected
+
+publish_offboard_heartbeat：
+
+    message = OffboardControlMode()
+    message.position = True
+
+這告訴 PX4：
+
+    目前 Offboard 使用 position control。
+
+publish_setpoint：
+
+    target_ned = enu_to_ned(setpoint.position_local_enu)
+    message.position = target_ned.as_list()
+    message.yaw = yaw_enu_to_ned(setpoint.yaw_local_enu)
+
+這裡做 ENU -> NED 轉換。
+
+原因：
+
+    ROS/Gazebo 使用 ENU：East, North, Up
+    PX4 使用 NED：North, East, Down
+
+所以在程式內部我們用 ROS/Gazebo 的 ENU 比較直覺，送給 PX4 前才轉成 NED。
+
+set_offboard_mode：
+
+    VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+    param1 = 1.0
+    param2 = 6.0
+
+這是要求 PX4 切到 Offboard mode。
+
+arm：
+
+    VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+    param1 = 1.0
+
+land：
+
+    VehicleCommand.VEHICLE_CMD_NAV_LAND
+
+send_command：
+
+    message.target_system = self.system_id
+
+這很重要。
+
+    MAV1 -> target_system = 1
+    MAV2 -> target_system = 2
+    MAV3 -> target_system = 3
+
+不然 command 可能送錯飛機。
+
+============================================================
+7. formation_controller.py 說明
+============================================================
+
+檔案：formation/formation_controller.py
+
+這個檔案處理編隊幾何。
+
+FormationReference：
+
+    @dataclass(frozen=True)
+    class FormationReference:
+        position_world_enu: VectorENU
+        yaw_enu: float = 0.0
+
+它代表虛擬編隊中心。
+
+重點：
+
+    FormationReference 不是 leader 實際位置。
+    FormationReference 是地面端或各分散節點根據 leader command 算出來的虛擬目標。
+
+advance_reference：
+
+    reference.position_world_enu + velocity_enu * dt
+
+也就是根據速度積分更新 virtual reference。
+
+rotate_offset：
+
+    把隊形 offset 根據 yaw 旋轉。
+
+例如 line formation 中：
+
+    leader slot:   [0, 0, 0]
+    follower slot: [-spacing, 0, 0]
+
+如果 yaw 轉 90 度，offset 也要跟著轉。
+
+CentralizedFormationController.calculate：
+
+1. 取得隊形 offset
+
+    offsets = get_shape(
+        name=self.formation_type,
+        spacing=self.spacing,
+        vehicle_ids=states,
+        leader_id=leader_id,
+    )
+
+這裡使用 leader_id 的目的：
+
+    決定誰佔據隊形的 leader slot。
+
+不是讀 leader position。
+
+2. 算每台 UAV 的 world target
+
+    target_world = formation_reference + rotated_offset
+
+3. 轉成每台 PX4 自己 local frame 的 target
+
+    target_local = target_world - vehicle_origin
+
+因為每個 PX4 instance 的 local origin 可能不同，所以需要 vehicle_origins_enu。
+
+4. 回傳 VehicleSetpoint
+
+    commands[vehicle_id] = VehicleSetpoint(
+        position_local_enu=target_local,
+        yaw_local_enu=self.formation_reference.yaw_enu,
+    )
+
+所以集中式控制流程是：
+
+    leader command
+    -> virtual reference
+    -> formation shape offset
+    -> 每台 UAV 的 local setpoint
+
+不是：
+
+    leader actual position
+    -> follower relative target
+
+============================================================
+8. distributed_vehicle_node.py 說明
+============================================================
+
+檔案：formation/distributed_vehicle_node.py
+
+這是分散式控制用的節點。
+
+每一台 UAV 都會啟一個 distributed_vehicle_node。
+
+launch 後會有：
+
+    distributed_vehicle_1
+    distributed_vehicle_2
+    distributed_vehicle_3
+
+每個 node 都有自己的參數：
+
+    vehicle_id
+    namespace
+    vehicle_origin_enu
+
+例如 distributed_vehicle_2：
+
+    vehicle_id: 2
+    namespace: MAV2
+    vehicle_origin_enu: [2.0, 0.0, 0.0]
+
+它會建立：
+
+    self.vehicle = VehicleInterface(self, namespace, self.vehicle_id)
+
+所以 distributed_vehicle_2 只會控制 MAV2。
+
+它訂閱：
+
+    /formation/status
+    /formation/command
+
+它不訂閱其他 UAV 的 local position。
+
+control_loop：
+
+1. 確認目前是否 active
+
+    self.status.control_mode == 'distributed'
+    self.status.mission_state == 'FORMATION'
+
+2. 確認 command 沒 timeout
+
+    age = (now_ns - self.last_command_ns) / 1e9
+
+3. 根據 command 更新自己的 virtual reference
+
+    MOVE -> advance_reference
+    SET_YAW -> set_reference_yaw
+
+4. 算自己的 setpoint
+
+    offsets = get_shape(...)
+    target_world = formation_reference + rotated_offset
+    target_local = target_world - vehicle_origin
+
+5. 發給自己的 PX4
+
+    self.vehicle.publish_offboard_heartbeat()
+    self.vehicle.publish_setpoint(setpoint)
+
+這就是分散式。
+
+注意：
+
+    每台 UAV 都收到同一份 /formation/command。
+    但是每台只根據自己的 vehicle_id 算自己的目標點。
+
+============================================================
+9. formation.launch.py 說明
+============================================================
+
+檔案：launch/formation.launch.py
+
+可以用 control_mode 選模式。
+
+集中式：
+
+    ros2 launch formation formation.launch.py control_mode:=centralized
+
+會啟動：
+
+    formation_node
+    leader_command_node
+
+分散式：
+
+    ros2 launch formation formation.launch.py control_mode:=distributed
+
+會啟動：
+
+    formation_node
+    leader_command_node
+    distributed_vehicle_1
+    distributed_vehicle_2
+    distributed_vehicle_3
+
+注意：
+
+    PX4/Gazebo 的啟動是另一個 launch。
+    formation.launch.py 只負責 formation 控制，不負責啟動無人機模擬。
+
+============================================================
+10. formation.yaml 說明
+============================================================
+
+檔案：config/formation.yaml
+
+常用參數：
+
+    control_frequency: 100.0
+
+formation_node control loop 頻率。
+建議 100 Hz。
+
+    control_mode: centralized
+
+預設控制模式。
+也可以 launch 時用 control_mode:=distributed 覆蓋。
+
+    leader_id: 1
+
+預設 leader。
+
+    formation_type: line
+
+目前隊形。
+可用：
+
+    line
+    triangle
+    v_shape
+    column
+
+    formation_spacing: 2.0
+
+隊形間距。
+測試撞機時建議先調大到 4.0。
+
+    takeoff_height: 3.0
+
+起飛高度，這裡使用 ENU，所以 3.0 表示 Up 3 公尺。
+
+    formation_reference_enu: [0.0, 0.0, 3.0]
+
+虛擬編隊中心的初始位置。
+這不是 leader 位置。
+
+    vehicle_origins_enu:
+      MAV1: [0.0, 0.0, 0.0]
+      MAV2: [2.0, 0.0, 0.0]
+      MAV3: [0.0, 2.0, 0.0]
+
+實際寫法是 flat list：
+
+    vehicle_origins_enu: [
+      0.0, 0.0, 0.0,
+      2.0, 0.0, 0.0,
+      0.0, 2.0, 0.0
+    ]
+
+這代表每台 PX4 local origin 在共同 Gazebo world ENU 中的位置。
+
+    command_timeout: 1.0
+
+如果超過 1 秒沒有收到 leader command，會觸發 fault landing。
+
+============================================================
+11. 撞機原因與調整方式
+============================================================
+
+模擬時撞機，通常不是單純頻率問題，而是以下幾種原因：
+
+------------------------------------------------------------
+原因 1：formation_spacing 太小
+------------------------------------------------------------
+
+如果：
+
+    formation_spacing: 2.0
+    minimum_vehicle_distance: 1.0
+
+三台 UAV 在剛進入 FORMATION 時很容易互相靠太近。
+
+建議先改成：
+
+    formation_spacing: 4.0
+    minimum_vehicle_distance: 1.5
+
+------------------------------------------------------------
+原因 2：進入 FORMATION 時路徑交叉
+------------------------------------------------------------
+
+目前沒有做 transition layer。
+
+也就是：
+
+    起飛完成
+    -> 直接切 FORMATION
+    -> 三台同時往自己的 formation target 飛
+
+如果 target 排列導致 MAV2 和 MAV3 路徑交叉，就可能撞機。
+
+解法：
+
+1. 先用 line formation 測試。
+
+    formation_type: line
+    formation_spacing: 4.0
+
+2. 把 formation_reference_enu 移開起飛點。
+
+例如：
+
+    formation_reference_enu: [4.0, 0.0, 3.0]
+
+或：
+
+    formation_reference_enu: [4.0, 4.0, 3.0]
+
+不要一開始就放：
+
+    formation_reference_enu: [0.0, 0.0, 3.0]
+
+因為這會讓編隊中心剛好在 MAV1 起飛點上方，其他 UAV 可能往 MAV1 附近靠。
+
+------------------------------------------------------------
+原因 3：leader command 速度太快
+------------------------------------------------------------
+
+測試時先不要用 0.5 m/s 或更快。
+
+建議先用：
+
+    velocity_east: 0.2
+
+例如：
+
+    ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand     "{command: 1, velocity_east: 0.2, velocity_north: 0.0, velocity_up: 0.0, yaw_rate: 0.0, duration: 5.0}"
+
+穩定後再逐步提高。
+
+------------------------------------------------------------
+原因 4：maximum_setpoint_jump 太小或太大
+------------------------------------------------------------
+
+    maximum_setpoint_jump: 5.0
+
+這是 safety manager 用來檢查 setpoint 是否突然跳太遠。
+
+如果 formation_reference 離目前位置太遠，可能一進 FORMATION 就觸發 safety。
+
+建議搭配 spacing 使用：
+
+    formation_spacing: 4.0
+    maximum_setpoint_jump: 6.0
+
+但不要無限制調大，否則安全檢查會失去意義。
+
+------------------------------------------------------------
+原因 5：vehicle_origins_enu 和 PX4/Gazebo 初始位置不一致
+------------------------------------------------------------
+
+multi_PX4.launch.py 中的 pose：
+
+    MAV1: 0,0,0
+    MAV2: 2,0,0
+    MAV3: 0,2,0
+
+formation.yaml 裡也要對應：
+
+    vehicle_origins_enu: [
+      0.0, 0.0, 0.0,
+      2.0, 0.0, 0.0,
+      0.0, 2.0, 0.0
+    ]
+
+如果這兩邊不一致，target_local 會算錯，飛機可能往錯誤位置飛。
+
+============================================================
+12. 建議測試參數
+============================================================
+
+如果你現在會撞機，建議先用這組比較穩的測試參數：
+
+    formation_type: line
+    formation_spacing: 4.0
+    formation_reference_enu: [4.0, 0.0, 3.0]
+    minimum_vehicle_distance: 1.5
+    maximum_setpoint_jump: 6.0
+    command_timeout: 1.0
+
+leader command 先用低速：
+
+    ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand     "{command: 1, velocity_east: 0.2, velocity_north: 0.0, velocity_up: 0.0, yaw_rate: 0.0, duration: 5.0}"
+
+任務完成降落：
+
+    ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand     "{command: 3}"
+
+============================================================
+13. 頻率建議
+============================================================
+
+建議配置：
+
+    formation_node control_loop: 100 Hz
+    PX4 Offboard heartbeat/setpoint: 100 Hz
+    leader_command_node: 20 Hz
+    formation status: 10 Hz
+
+原因：
+
+    control_loop 是直接餵 PX4 Offboard，需要高頻率。
+    leader command 是高階指令，不需要 100 Hz。
+
+建議：
+
+    control_frequency: 100.0
+
+    leader_command_node:
+      publish_frequency: 20.0
+
+如果實機通訊穩定，也可以把 leader command 提高到 50 Hz。
+但目前不建議一開始就拉到 100 Hz。
+
+============================================================
+14. 使用流程
+============================================================
+
+1. 啟動 PX4/Gazebo 三台 UAV。
+
+2. 啟動 formation。
+
+集中式：
+
+    ros2 launch formation formation.launch.py control_mode:=centralized
+
+分散式：
+
+    ros2 launch formation formation.launch.py control_mode:=distributed
+
+3. 起飛：
+
+    ros2 service call /formation/takeoff std_srvs/srv/Trigger "{}"
+
+4. 發 leader move command：
+
+    ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand     "{command: 1, velocity_east: 0.2, velocity_north: 0.0, velocity_up: 0.0, yaw_rate: 0.0, duration: 5.0}"
+
+5. 任務完成並整隊降落：
+
+    ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand     "{command: 3}"
+
+============================================================
+15. 最重要的觀念
+============================================================
+
+目前的程式設計符合以下需求：
+
+1. 三台 UAV 同時起飛。
+2. Leader 發高階 command。
+3. Follower 不讀 leader 實際位置。
+4. 集中式由地面端算三台 setpoint。
+5. 分散式由每台 UAV controller 算自己的 setpoint。
+6. 結束後由 MISSION_COMPLETE command 觸發整隊降落。
+7. safety failure 或 command timeout 時，整隊 emergency landing。
+
+最重要的差異：
+
+    使用 leader command，不是使用 leader position。
+
+也就是：
+
+    正確：Leader 說「整隊往 East 0.2 m/s」。
+    不正確：Follower 讀 leader 目前座標，再跟著 leader 走。
+
+目前程式採用的是前者。

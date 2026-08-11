@@ -1,0 +1,42 @@
+對應檔案：msg/FormationStatus.msg
+
+這份檔案的角色：
+這是 formation 系統對外發布的狀態訊息。formation_node 發布 `/formation/status`，leader_command_node 和 distributed_vehicle_node 會讀它。
+
+主要寫法：
+欄位通常用來表示：
+- mission state
+- leader_id
+- leader_generation
+- formation error
+- 是否 ready/flying/landing
+- fault reason
+
+實際意義：
+- leader_command_node 需要知道 leader 是否變更。
+- distributed_vehicle_node 需要知道現在是不是進入 FORMATION，避免起飛階段就自己搶控制。
+- 地面站可以訂閱它顯示整隊狀態。
+
+重要細節：
+- leader_generation 可以幫助判斷 leader 是否剛切換。只看 leader_id 有時不夠。
+- 如果 status 沒發布，distributed/leader command 節點會不知道任務進度。
+
+常見調整方向：
+- 想在地面端看到更多資訊：在這裡加欄位，再改 main_node 的 status publisher。
+
+目前檔案實際內容：
+builtin_interfaces/Time stamp
+
+uint8 leader_id
+string mission_state
+string control_mode
+string formation_type
+
+bool formation_ready
+float32 maximum_position_error
+
+bool leader_healthy
+string leader_fault_reason
+uint32 leader_generation
+uint8 failed_leader_id
+bool awaiting_ground_confirmation

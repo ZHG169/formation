@@ -1,0 +1,50 @@
+對應檔案：formation/formation_controller.py
+
+這份檔案的角色：
+這是編隊控制的核心計算層。它把「編隊形狀 offset」、「共同 reference」、「每台 UAV 的 local origin」組合起來，算出每台 UAV 應該飛到哪裡。若啟用 CPF，也會在這層把位置目標轉成速度避障命令。
+
+主要寫法：
+1. add_vectors / subtract_vectors
+   ENU 向量加減。用於 local/world 座標轉換：
+   - world = origin + local
+   - local = world - origin
+
+2. rotate_offset(offset, yaw_enu)
+   把編隊 offset 依照 reference yaw 旋轉。也就是同一個 triangle/line，如果 reference yaw 轉向，整個編隊方向也跟著轉。
+
+3. vector_distance
+   計算兩個 ENU 點距離，常用於 formation error。
+
+4. FormationReference dataclass
+   表示編隊參考中心/基準：
+   - position_world_enu：共同 world ENU 中的目標點
+   - yaw_enu：編隊方向
+   這個 reference 可以來自 YAML，也可以被 FormationCommand 更新。
+
+5. advance_reference(reference, velocity_enu, yaw_rate, dt_seconds)
+   根據 leader command 的速度命令推進 reference。這符合你的需求：leader 下的是 control command，不是要求 follower 讀 leader 實際位置，也不是預先寫死路徑。
+
+6. CentralizedFormationController
+   集中式控制器：
+   - formation_node 一次拿到所有 UAV state
+   - 呼叫 get_shape() 得到每台 offset
+   - 用 formation_reference + offset 得到每台 world target
+   - 再用 vehicle_origins 把 world target 轉回該 UAV local target
+   - 回傳 `{vehicle_id: VehicleSetpoint}`
+   如果 CPF enabled，會再呼叫 apply_cpf_to_setpoints，把位置 setpoint 修正成避障後的 velocity setpoint。
+
+7. DistributedFormationController
+   分散式控制器：
+   - 每台 distributed_vehicle_node 只算自己的 setpoint
+   - 它依照共同的 command/reference、formation shape、自己的 vehicle_id、自己的 local position 產生自己的控制輸出
+   - 原則上不需要讀 leader 的 PX4 位置
+
+重要細節：
+- 現在的集中式並不是把 leader 實際位置當 reference，而是使用 formation_reference 或 leader command 推進出來的虛擬 reference。
+- followers 可以知道其他 UAV 的位置用於安全/避障，這不等於「讀 leader 位置作路徑跟隨」。你的修正是合理的：禁止的是寫死路徑或直接追 leader 真實位置，不是禁止知道周圍飛機位置。
+- vehicle_origins_enu 非常重要。target_world 轉 target_local 時若 origin 錯，飛機會飛到錯誤位置。
+
+常見調整方向：
+- 想讓整隊移動：應透過 FormationCommand 的 velocity/yaw_rate 推進 reference。
+- 想改隊形：改 formation_shapes.py 或呼叫 set_formation service。
+- 想降低碰撞風險：調 CPF 參數與 safety 參數，不一定要改這個檔案。

@@ -1,0 +1,31 @@
+對應檔案：launch/formation.launch.py
+
+這份檔案的角色：
+這是啟動 formation 控制系統的 launch 檔。它只啟動 formation 相關 ROS node，不負責啟動 PX4/Gazebo。你的設計是 PX4/Gazebo 另外啟動，formation 另外啟動，這樣比較乾淨。
+
+主要寫法：
+1. get_package_share_directory('formation')
+   找到 install/share/formation 的位置，進而找到 config/formation.yaml。
+
+2. DeclareLaunchArgument('control_mode')
+   允許啟動時指定集中式或分散式：
+   - `ros2 launch formation formation.launch.py control_mode:=centralized`
+   - `ros2 launch formation formation.launch.py control_mode:=distributed`
+
+3. formation_node
+   永遠啟動。它負責任務狀態、安全、起飛降落、集中式控制。
+
+4. leader_command_node
+   永遠啟動。它負責持續發布 `/formation/command`，提供高階 command relay。
+
+5. distributed_nodes
+   只有 control_mode == distributed 時才啟動三個 distributed_vehicle_node。
+
+重要細節：
+- 如果你只要集中式，預設就可以直接 launch。
+- 如果你要分散式，要加 `control_mode:=distributed`。
+- 這個 launch 不會自動啟動 PX4，因此你要先確認三台 `/MAVx/fmu/...` topic 已存在。
+
+常見調整方向：
+- 想 formation 跟 PX4 分開啟動：保持現在這種設計。
+- 想加入 RViz 或監控 node：可以在這裡新增 Node。

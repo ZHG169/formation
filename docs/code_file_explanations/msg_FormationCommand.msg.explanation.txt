@@ -1,0 +1,54 @@
+對應檔案：msg/FormationCommand.msg
+
+這份檔案的角色：
+這是 leader command/high-level command 的自訂 ROS message。leader_command_node 用它發布 `/formation/command`，formation_node 或 distributed_vehicle_node 用它更新 formation reference。
+
+主要寫法：
+這類 msg 檔每一行通常是一個欄位：
+`型別 欄位名稱`
+例如可能包含：
+- leader_id
+- sequence
+- stamp 或 timestamp
+- velocity_enu
+- yaw_rate
+- hold/reference 相關欄位
+
+實際意義：
+- 它不是 PX4 的 VehicleCommand。
+- 它是你自己的 formation 高階命令，用來描述整隊應如何更新 reference。
+- follower 不需要讀 leader 實際位置；它只要讀這個 command，就能算自己的目標。
+
+重要細節：
+- 如果 msg 欄位改了，使用它的 Python 檔都要同步改。
+- 改 msg 後一定要重新 colcon build 並 source install/setup.bash。
+
+常見調整方向：
+- 想增加整隊速度命令：在這裡加 velocity 欄位，但要同步改 leader_command_node/main_node/distributed_vehicle_node。
+- 想增加模式，例如 HOLD/MOVE：可以加 command_type 或 mode 欄位。
+
+目前檔案實際內容：
+builtin_interfaces/Time stamp
+builtin_interfaces/Time execute_at
+
+uint8 leader_id
+uint32 leader_generation
+uint32 sequence
+
+uint8 command
+uint8 HOLD=0
+uint8 MOVE=1
+uint8 SET_YAW=2
+uint8 MISSION_COMPLETE=3
+uint8 EMERGENCY_STOP=4
+
+float32 velocity_east
+float32 velocity_north
+float32 velocity_up
+
+float32 yaw_enu
+float32 yaw_rate
+float32 duration
+
+string formation_type
+float32 spacing

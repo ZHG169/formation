@@ -1,0 +1,48 @@
+對應檔案：formation/leader_manager.py
+
+這份檔案的角色：
+這是 leader 管理與故障判定。它負責記住目前誰是 leader、允許地面端切換 leader、檢查 leader 是否健康，以及 leader 故障是否已持續超過一段時間。
+
+主要寫法：
+1. VehicleHealth dataclass
+   表示單台 UAV 健康狀態：
+   - healthy：是否健康
+   - reason：不健康原因
+   - position_age_seconds：位置資料多久沒更新
+
+2. LeaderCheck dataclass
+   表示 leader 檢查結果：
+   - healthy：leader 當下是否健康
+   - failure_confirmed：是否已確認 leader 故障
+   - reason：故障原因
+   - unhealthy_duration：不健康持續多久
+
+3. LeaderManager.__init__
+   設定：
+   - initial_leader_id
+   - position_timeout
+   - failure_hold_duration
+   並建立 failure_since_ns 等內部狀態。
+
+4. set_leader(leader_id, available_ids)
+   地面端呼叫 SetLeader service 時會用到。它會檢查指定 leader 是否存在，若成功切換 leader，leader_generation 會加 1。
+
+5. evaluate_vehicle(...)
+   檢查單台 UAV 是否健康，例如：
+   - state 是否存在
+   - 是否收到 status
+   - preflight 是否 OK
+   - position 是否收到且有效
+   - position 是否 timeout
+   - 是否要求 armed/offboard
+
+6. check_leader(states, now_ns, ...)
+   對目前 leader 做健康檢查。如果 leader 不健康但時間還很短，只記錄；如果超過 failure_hold_duration，才視為 confirmed failure。
+
+重要細節：
+- leader_generation 很重要。leader 改變時，leader_command_node 可以知道 command 要重置或重發。
+- 目前整隊降落由地面端確認比較安全，也就是 leader 故障後不自動亂選 leader 繼續飛，避免測試中出現不可預期行為。
+
+常見調整方向：
+- 想 leader 故障後自動換 leader：要在這個檔案加 election 邏輯，再讓 main_node 接它。
+- 想讓檢查更寬鬆：調 leader_position_timeout 或 leader_failure_hold_duration。

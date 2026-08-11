@@ -1,0 +1,35 @@
+對應檔案：src/multi_takeoff_land.py
+
+這份檔案的角色：
+這是早期單檔版的三機同時起飛/降落控制程式。它把 VehicleInterface、MissionManager、SafetyManager 等現在拆開的概念集中寫在同一個檔案裡。現在主要架構已模組化，所以這份比較像參考或舊版測試程式。
+
+主要寫法：
+1. 建立三台 UAV 的 publisher/subscriber
+   直接在同一個 Node 裡建立 /MAV1、/MAV2、/MAV3 的 OffboardControlMode、TrajectorySetpoint、VehicleCommand publisher。
+
+2. Trigger service
+   提供：
+   - /formation/takeoff
+   - /formation/land
+   起飛 callback 通常只切 state 到 warmup；降落 callback 直接送 LAND command。
+
+3. timer/control_loop
+   用固定頻率持續發布 Offboard heartbeat 和 setpoint。這是 PX4 Offboard 必要條件。
+
+4. warmup -> offboard -> arm -> flying
+   起飛流程不是單純發一次 takeoff，而是：
+   - 先發布 setpoint/heartbeat 一段時間
+   - 切 Offboard mode
+   - Arm
+   - 持續發布起飛高度 setpoint
+
+5. coordinate_convert
+   後來已改成 import 座標轉換工具，避免直接寫 NED z=-3.0 這種不直覺寫法。
+
+重要細節：
+- 如果現在主系統用 formation/main_node.py，這份不應該和 formation_node 同時控制同一批 PX4，否則兩個 node 會搶 Offboard setpoint。
+- 它很適合用來理解「最小版同時起飛/降落」流程。
+
+常見調整方向：
+- 若只是測起降，可用這份。
+- 若要編隊、leader、CPF、安全狀態機，應使用模組化 formation_node。

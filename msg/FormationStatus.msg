@@ -1,0 +1,15 @@
+builtin_interfaces/Time stamp
+
+uint8 leader_id
+string mission_state
+string control_mode
+string formation_type
+
+bool formation_ready
+float32 maximum_position_error
+
+bool leader_healthy
+string leader_fault_reason
+uint32 leader_generation
+uint8 failed_leader_id
+bool awaiting_ground_confirmation

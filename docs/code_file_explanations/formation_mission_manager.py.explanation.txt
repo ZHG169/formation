@@ -1,0 +1,60 @@
+對應檔案：formation/mission_manager.py
+
+這份檔案的角色：
+這是任務狀態機。它不直接知道 ROS topic，也不直接 publish PX4 訊息；它負責決定現在任務在哪個階段，以及這個階段 main_node 應該做什麼，例如 warm-up、arm、takeoff、formation、land。
+
+主要寫法：
+1. MissionState Enum
+   定義任務狀態：
+   - IDLE：閒置
+   - WAITING_READY：等待三台 UAV estimator/preflight/local position ready
+   - OFFBOARD_WARMUP：先連續發布 Offboard heartbeat 和 setpoint
+   - TAKEOFF：切 Offboard、Arm，並等待到達起飛高度
+   - FORMATION：開始編隊控制
+   - LANDING：一般降落
+   - LANDED：已降落
+   - EMERGENCY_LANDING：安全觸發的緊急降落
+   - AWAITING_GROUND_CONFIRMATION：降落後等待地面端確認
+   - ERROR：錯誤狀態
+
+2. MissionOutput dataclass
+   狀態機每次 update 回傳一個輸出，告訴 main_node 要做什麼：
+   - setpoints：這回合要發布的位置/速度目標
+   - publish_offboard：是否要發布 Offboard heartbeat
+   - set_offboard_and_arm：是否要送 Offboard mode + Arm 命令
+   - land_all：是否要對所有 UAV 送 LAND
+
+3. request_takeoff()
+   外部 `/formation/takeoff` service 會呼叫它。它不是直接讓飛機起飛，而是把狀態改成 WAITING_READY。真正 arm/offboard/takeoff 是後面 control_loop 依狀態機逐步執行。
+
+4. request_land()
+   外部 `/formation/land` service 會呼叫它。若目前在 TAKEOFF/FORMATION 等可降落狀態，狀態機會要求 land_all。
+
+5. update(states, now_ns, formation_setpoints=None)
+   這是核心。main_node 每 100 Hz 呼叫一次，MissionManager 根據目前 states 決定：
+   - 是否三台 ready
+   - warmup 時間是否達成
+   - 是否要 arm/offboard
+   - 起飛高度是否到達
+   - 進入 formation 後是否使用 formation_controller 算出的 setpoint
+
+6. ready 判斷
+   通常會檢查每台 UAV：
+   - status_received
+   - preflight_ok
+   - position_received
+   - position_valid
+   - local position 沒 timeout
+
+7. takeoff setpoint
+   起飛階段會產生每台自己的 setpoint：local ENU 的 up = takeoff_height。送到 PX4 前由 VehicleInterface 轉成 NED z = -height。
+
+重要細節：
+- takeoff callback 不是直接 publish topic，因為它只負責「開始任務」。真正的 publish 必須穩定、連續、週期性地在 control_loop 做。
+- Offboard warmup 很重要。PX4 不喜歡你一切 Offboard 才開始送 setpoint，它需要先看到連續 setpoint/heartbeat。
+- 降落可以直接送 LAND command，因為 PX4 進入降落模式後會自行管理下降與 disarm。
+
+常見調整方向：
+- 起飛太慢或太久才進 formation：調整 `takeoff_altitude_tolerance` 或確認高度回授。
+- 卡在 WAITING_READY：看哪台缺 status/preflight/position。
+- 卡在 OFFBOARD_WARMUP：看 warmup duration 或 control_loop 是否有在跑。

@@ -1,0 +1,22 @@
+對應檔案：scripts/leader_command_node
+
+這份檔案的角色：
+這是 leader_command_node 的 ROS 2 executable wrapper。它讓你可以用：
+`ros2 run formation leader_command_node`
+或透過 formation.launch.py 啟動。
+
+主要寫法：
+通常只是 import `formation.leader_command_node.main` 並執行。
+
+重要細節：
+- 它不是主要邏輯檔。
+- 修改 command relay 行為請看 formation/leader_command_node.py。
+
+目前檔案實際內容：
+#!/usr/bin/env python3
+
+from formation.leader_command_node import main
+
+
+if __name__ == '__main__':
+    main()

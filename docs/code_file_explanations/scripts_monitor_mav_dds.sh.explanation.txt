@@ -1,0 +1,40 @@
+對應檔案：scripts/monitor_mav_dds.sh
+
+這份檔案的角色：
+這是 DDS/MicroXRCEAgent/ROS topic 健康檢查腳本。它幫你確認 MAV1/MAV2/MAV3 的 PX4 DDS topic 是否真的出現在 ROS 2 graph 裡，避免 formation_node 在 topic 還沒 ready 時就起飛。
+
+主要寫法：
+1. source ROS 與 workspace
+   先 source `/opt/ros/humble/setup.bash` 和 workspace install/setup.bash，確保 ros2 CLI 找得到 formation 與 px4_msgs。
+
+2. ROS_DOMAIN_ID=0
+   監控腳本、PX4、MicroXRCEAgent、formation node 必須在同一個 ROS_DOMAIN_ID。
+
+3. ROS2CLI_DISABLE_DAEMON=1
+   避免 ros2 daemon graph cache 造成假象。例如實際 topic 已消失，但 ros2 topic list 還看得到舊資料。
+
+4. find_agent_pids / port_8888_in_use
+   檢查 MicroXRCEAgent 是否已經存在，以及 UDP 8888 是否被占用。
+
+5. cleanup()
+   如果 Agent 是這個腳本自己啟動的，Ctrl+C 時會幫你停止；如果 Agent 是外部原本就存在，腳本只停止監控，不會殺掉既有 Agent。
+
+6. resolve_topic()
+   會同時支援有 `_v1` 後綴或沒有 `_v1` 後綴的 topic，例如：
+   - /MAV1/fmu/out/vehicle_status
+   - /MAV1/fmu/out/vehicle_status_v1
+
+7. 檢查項目
+   對每台 MAV 檢查：
+   - /MAVx/fmu/in/offboard_control_mode
+   - /MAVx/fmu/in/trajectory_setpoint
+   - /MAVx/fmu/in/vehicle_command
+   - /MAVx/fmu/out/vehicle_status(_v1)
+
+重要細節：
+- MicroXRCEAgent log 出現 `rt/MAV1/fmu/out/... data writer` 是 DDS raw topic 名稱，ROS 2 看到時通常會是 `/MAV1/fmu/out/...`，這不是奇怪錯誤。
+- 如果沒有啟動無人機卻還有 MicroXRCEAgent，表示 Agent process 殘留或是你之前另外開的腳本啟動後沒停。
+
+常見調整方向：
+- 如果 topic 一直 NG，先確認 PX4 process 是否存在，再確認 PX4_UXRCE_DDS_PORT 是否為 8888。
+- 若 QGround/Gazebo 與 ROS graph 狀態不同步，先停乾淨殘留 process。

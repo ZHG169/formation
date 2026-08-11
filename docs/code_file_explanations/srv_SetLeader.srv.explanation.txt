@@ -1,0 +1,27 @@
+對應檔案：srv/SetLeader.srv
+
+這份檔案的角色：
+這是指定 leader 的 ROS 2 service 介面。main_node 會建立 `/formation/set_leader`，地面端可以呼叫它切換 leader。
+
+主要寫法：
+ROS srv 檔案用 `---` 分成 request 與 response：
+- request：通常包含 leader_id
+- response：通常包含 success/message
+
+使用概念：
+地面端呼叫：
+`ros2 service call /formation/set_leader formation/srv/SetLeader "{leader_id: 2}"`
+成功後 main_node 會請 LeaderManager 更新 leader，並更新 status 裡的 leader_generation。
+
+重要細節：
+- leader_id 必須存在於目前 vehicle IDs。
+- 切 leader 不代表讀取新 leader 位置作目標，而是改變 formation shape 裡誰佔據 leader slot。
+
+常見調整方向：
+- 想加更完整回覆，例如 old_leader/new_leader，也可以擴充 srv，但要同步改 callback。
+
+目前檔案實際內容：
+uint8 leader_id
+---
+bool success
+string message

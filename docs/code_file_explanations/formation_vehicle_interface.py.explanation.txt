@@ -1,0 +1,74 @@
+對應檔案：formation/vehicle_interface.py
+
+這份檔案的角色：
+這是每一台 PX4 無人機的 ROS 2 介面包裝。它把 PX4 topic 包成比較好用的 Python 類別，讓 main_node 或 distributed_vehicle_node 不用每次自己建立 publisher、subscriber、VehicleCommand。
+
+主要寫法：
+1. VehicleState dataclass
+   儲存單台 UAV 的目前狀態：
+   - position_local_enu：PX4 local position 轉成 ENU 後的位置
+   - velocity_local_enu：PX4 local velocity 轉成 ENU 後的速度
+   - yaw_local_enu：yaw 轉成 ENU 後的角度
+   - armed：是否已解鎖
+   - landed：是否在地面
+   - preflight_ok：PX4 preflight check 是否通過
+   - position_valid：local position 是否有效
+   - status_received / position_received / land_status_received：是否已收到對應 topic
+   - last_position_update_ns：最後一次 position 更新時間，用於 timeout 檢查
+   - nav_state / offboard_enabled：PX4 飛行模式狀態
+
+2. VehicleSetpoint dataclass
+   表示要送給 PX4 的目標：
+   - position_local_enu：位置 setpoint
+   - yaw_local_enu：yaw setpoint
+   - velocity_local_enu：速度 setpoint，可為 None
+   如果 velocity_local_enu 不是 None，代表目前偏向 velocity control。
+
+3. VehicleInterface.__init__
+   依照 namespace 建立 topic 名稱，例如 MAV1：
+   - /MAV1/fmu/in/offboard_control_mode
+   - /MAV1/fmu/in/trajectory_setpoint
+   - /MAV1/fmu/in/vehicle_command
+   - /MAV1/fmu/out/vehicle_status_v1
+   - /MAV1/fmu/out/vehicle_local_position_v1
+   - /MAV1/fmu/out/vehicle_land_detected
+   這裡的 namespace 必須和 PX4 啟動時 `PX4_UXRCE_DDS_NS` 一致。
+
+4. publish_offboard_heartbeat(use_velocity=False)
+   發布 OffboardControlMode。PX4 要求 Offboard 模式下持續收到 heartbeat，否則會拒絕進入或退出 Offboard。
+   - use_velocity=False：position=True
+   - use_velocity=True：velocity=True
+   目前 CPF velocity control 時，應該使用 velocity heartbeat。
+
+5. publish_setpoint(setpoint)
+   把 VehicleSetpoint 發布成 PX4 TrajectorySetpoint。
+   - 若 velocity_local_enu 有值：送 velocity setpoint，position 填 NaN
+   - 若 velocity_local_enu 為 None：送 position setpoint
+   送出前會透過 coordinate_convert.py 做 ENU -> NED。
+
+6. arm()
+   呼叫 send_command，送 `VEHICLE_CMD_COMPONENT_ARM_DISARM`，param1=1.0 表示 arm。
+
+7. disarm()
+   若程式裡有使用，通常 param1=0.0 表示 disarm。
+
+8. land()
+   送 `VEHICLE_CMD_NAV_LAND`，PX4 會進入降落流程。降落後 PX4 通常會自動 disarm。
+
+9. send_command(command, param1=0.0, param2=0.0)
+   建立 VehicleCommand，指定：
+   - target_system = system_id，例如 MAV1=1、MAV2=2、MAV3=3
+   - target_component = 1
+   - source_system = 255
+   - from_external = True
+   param1/param2 的意義依 command 不同，例如設定模式時 param1=1、param2=6 表示切到 custom main mode 的 Offboard。
+
+重要細節：
+- `publish_offboard_heartbeat()` 不能是 pass，否則 PX4 不會穩定進入 Offboard。
+- topic 後綴 `_v1` 要看 px4_msgs 版本。PX4 v1.17 常見會出現 `/vehicle_status_v1`、`/vehicle_local_position_v1` 這類 topic。
+- 這個檔案是所有控制 node 和 PX4 之間的最後一層，座標轉換也應該集中在這裡附近。
+
+常見調整方向：
+- 如果 topic 找不到，先看 namespace 是否一致。
+- 如果 QGround 顯示 flying 但 Gazebo 不動，除了這裡，也要檢查 PX4 gz_bridge 與 motor command。
+- 如果 velocity mode 不動，檢查 heartbeat 是否真的 velocity=True，且 TrajectorySetpoint.velocity 不是 NaN。

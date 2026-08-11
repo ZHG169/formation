@@ -1,0 +1,35 @@
+對應檔案：CMakeLists.txt
+
+這份檔案的角色：
+這是 ROS 2 package 的建置設定檔。因為你的 formation package 目前同時包含 Python node、msg、srv、launch、config，所以 CMakeLists.txt 主要負責告訴 colcon/ament：哪些介面要產生、哪些 script 要安裝、哪些 launch/config 檔要放進 install/share。
+
+主要寫法：
+1. find_package(...)
+   這一段會找 ROS 2 建置時需要的套件，例如 ament_cmake、rosidl_default_generators、std_msgs、geometry_msgs 等。如果某個 msg/srv 使用到某個型別，但這裡沒有 find_package，編譯時可能會失敗。
+
+2. rosidl_generate_interfaces(...)
+   這一段用來產生自訂 msg/srv：
+   - msg/FormationCommand.msg
+   - msg/FormationStatus.msg
+   - msg/FormationError.msg
+   - srv/SetLeader.srv
+   - srv/SetFormation.srv
+   這些介面產生後，Python 才能 import `from formation.msg import ...` 或 `from formation.srv import ...`。
+
+3. install(PROGRAMS ...)
+   這一段會安裝 scripts 底下可執行的入口檔，例如 formation_node、leader_command_node、distributed_vehicle_node。安裝後才可以用：
+   `ros2 run formation formation_node`
+
+4. install(DIRECTORY ...)
+   這一段會把 launch、config、formation Python package 安裝到 install 目錄。launch 檔需要被安裝後，才能使用：
+   `ros2 launch formation formation.launch.py`
+
+重要細節：
+- 如果你新增 Python 檔案，只要它在 `formation/` package 內通常會跟著安裝。
+- 如果你新增 executable wrapper，例如 scripts/new_node，就要確認 install(PROGRAMS ...) 有包含它。
+- 如果你新增 msg/srv，一定要加進 rosidl_generate_interfaces，否則 build 後 Python import 不到。
+
+常見調整方向：
+- 新增服務：改 `srv/` 後同步改 CMakeLists.txt。
+- 新增訊息：改 `msg/` 後同步改 CMakeLists.txt。
+- 新增 launch/config：確認 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME}) 有包含。

@@ -1,0 +1,80 @@
+對應檔案：formation/main_node.py
+
+這份檔案的角色：
+這是 formation 系統的主節點，也是整個任務的總控。它把 VehicleInterface、MissionManager、FormationController、LeaderManager、SafetyManager 串起來，提供 takeoff/land/set_leader/set_formation service，並在 100 Hz control_loop 中執行控制。
+
+主要寫法：
+1. FormationNode(Node)
+   ROS 2 node 名稱是 `formation_node`。啟動後會印：
+   `Formation controller ready at 100.0 Hz`
+
+2. declare_parameters
+   宣告 YAML 可以設定的參數，例如：
+   - control_frequency
+   - control_mode
+   - formation_type / formation_spacing
+   - leader_id
+   - takeoff_height
+   - vehicle_origins_enu
+   - safety limits
+   - formation_reference_enu
+   - cpf_* 參數
+
+3. self.vehicles
+   建立三台 VehicleInterface：
+   - 1: MAV1
+   - 2: MAV2
+   - 3: MAV3
+   每一台都會對應自己的 PX4 namespace 與 system_id。
+
+4. mission_manager
+   管任務狀態：IDLE -> WAITING_READY -> OFFBOARD_WARMUP -> TAKEOFF -> FORMATION -> LANDING/LANDED。
+
+5. formation_controller
+   依 control_mode 建立 centralized 或 distributed 相關 controller。集中式時由 main_node 算所有 setpoint。
+
+6. leader_manager
+   管 leader_id、leader health、leader_generation。
+
+7. safety_manager
+   每個 control_loop 都會檢查狀態與 setpoint，超限就進 EMERGENCY_LANDING。
+
+8. services
+   main_node 建立外部呼叫介面：
+   - `/formation/takeoff`：開始起飛流程
+   - `/formation/land`：整隊降落
+   - `/formation/set_leader`：指定 leader
+   - `/formation/set_formation`：改編隊形狀/間距
+   起飛 service 不直接 publish 起飛 topic，而是切任務狀態，後續由 timer 週期控制。
+
+9. publishers
+   發布 `/formation/status`，讓 leader_command_node、distributed node 或地面站知道任務狀態。
+
+10. subscriptions
+   訂閱 `/formation/command`。leader_command_node 會持續發布 command，main_node 用它更新 reference。
+
+11. control_loop
+   這是最重要的函式，每 0.01 秒跑一次：
+   - 讀取三台 state
+   - 更新 leader 狀態
+   - 根據 command 推進 formation reference
+   - 如果集中式且進入 FORMATION，計算所有 setpoint
+   - 呼叫 MissionManager.update()
+   - 依 MissionOutput 發布 heartbeat/setpoint/arm/land
+   - 執行 SafetyManager 檢查
+   - 發布 FormationStatus
+
+12. velocity mode 判斷
+   如果 setpoint.velocity_local_enu 不是 None，main_node 會用 velocity heartbeat，並發布 velocity setpoint。這是 CPF velocity control 的重點。
+
+重要細節：
+- timer 不是「發一次」，而是持續以 control_frequency 呼叫 control_loop。PX4 Offboard 必須持續收到 heartbeat 和 setpoint。
+- `/formation/takeoff` service 成功只代表任務開始，不代表飛機已經起飛。真正起飛會等 READY、warmup、Offboard、Arm。
+- SafetyManager 如果回報 critical，main_node 會讓整隊 LAND。
+- 在 distributed mode，main_node 主要管理任務，不應在 FORMATION 階段同時和 distributed_vehicle_node 搶著發 setpoint。
+
+常見調整方向：
+- 要查為何沒起飛：看 log 卡在哪個 Mission state。
+- 要查為何剛編隊就降落：看 SafetyManager log。
+- 要改控制頻率：改 formation.yaml 的 control_frequency。
+- 要調整 command/reference：看 command_callback 與 formation_controller。

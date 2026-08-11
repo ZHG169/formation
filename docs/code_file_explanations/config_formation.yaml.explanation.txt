@@ -1,0 +1,53 @@
+對應檔案：config/formation.yaml
+
+這份檔案的角色：
+這是整個 formation 系統的參數中心。你不用每次改 Python 程式，就可以調整控制頻率、leader、編隊形狀、間距、起飛高度、CPF 避障、安全限制、各台 UAV 的 namespace 與 world 原點。
+
+主要寫法：
+1. formation_node.ros__parameters
+   這是主控節點 `formation_node` 讀取的參數。集中式控制主要看這一段。
+
+2. control_frequency
+   主控制迴圈頻率，目前是 100 Hz。也就是 main_node 的 timer 每 0.01 秒跑一次 control_loop。
+
+3. control_mode
+   可設定 centralized 或 distributed。
+   - centralized：formation_node 算出所有 UAV setpoint。
+   - distributed：formation_node 管任務狀態，每台 distributed_vehicle_node 自己算自己的 setpoint。
+
+4. leader_id
+   指定目前 leader 是哪台，例如 1 代表 MAV1。注意：目前程式的編隊不是讀 leader 實際位置當基準，而是用地面端/command/reference 產生的虛擬 reference。
+
+5. formation_type / formation_spacing
+   決定編隊形狀與間距。formation_type 會進到 formation_shapes.py 的 get_shape()。spacing 越大，目標點距離越遠，所以你看到直線編隊距離很大，第一個要看的就是這裡。
+
+6. formation_reference_enu
+   地面端給的共同 world ENU 參考點。這不是單機 local frame，而是三台共同參考的 world ENU。每台 UAV 會用自己的 vehicle_origin_enu 換回 local setpoint。
+
+7. vehicle_origins_enu
+   每台 PX4 local ENU 原點在 Gazebo world ENU 中的位置。這個非常重要。如果 Gazebo 生成位置是 MAV1=(0,0), MAV2=(2,0), MAV3=(0,2)，這裡就要一致。錯了會導致 setpoint 看起來突然跳很遠。
+
+8. cpf_* 參數
+   CPF 是目前用來做 UAV 間避障的速度場：
+   - cpf_enabled：是否啟用
+   - cpf_attraction_gain：往 formation target 靠近的力量
+   - cpf_repulsion_gain：彼此太近時推開的力量
+   - cpf_safe_distance：安全距離內推力會變強
+   - cpf_influence_distance：距離小於這個範圍才開始避障
+   - cpf_max_speed：CPF 輸出的最大速度
+   - cpf_output_velocity：true 表示送 velocity setpoint 給 PX4
+
+9. safety 參數
+   - minimum_vehicle_distance：低於這個距離觸發安全降落
+   - maximum_speed：速度超過觸發 safety
+   - maximum_setpoint_jump：位置模式才主要有意義；速度模式下不應拿 position jump 誤判
+   - maximum_altitude / geofence_radius：高度與水平範圍限制
+
+10. distributed_vehicle_1/2/3
+   分散式模式每台節點的參數。每台有自己的 vehicle_id、namespace、vehicle_origin_enu，但仍共享 formation shape、CPF 與參考點設定。
+
+常見調整方向：
+- 編隊距離太大：先調小 `formation_spacing`。
+- 剛進 FORMATION 就安全降落：檢查 `minimum_vehicle_distance` 是否太大、CPF 是否來不及推開、起飛點是否太近。
+- 速度超限：調小 `cpf_attraction_gain`、`cpf_repulsion_gain`、`cpf_max_speed`，或提高 `maximum_speed`，但提高 safety limit 不是優先解法。
+- setpoint jump：檢查 `vehicle_origins_enu` 與 Gazebo spawn pose 是否一致。

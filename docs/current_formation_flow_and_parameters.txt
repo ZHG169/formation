@@ -1,0 +1,757 @@
+目前三機起飛、編隊流程與參數說明
+日期：2026-08-11
+
+本文件整理目前 formation package 的程式碼流程、直線編隊距離為什麼看起來很大、CPF velocity control、安全檢查，以及常用參數如何調整。
+
+============================================================
+1. 目前整體狀態
+============================================================
+
+目前系統已經可以完成：
+
+1. 三台 PX4 SITL / Gazebo x500 生成。
+2. Micro XRCE-DDS 建立 /MAV1、/MAV2、/MAV3 namespace。
+3. formation_node 接收 /formation/takeoff 服務。
+4. 三台 UAV 進入 WAITING_READY。
+5. Offboard warm-up。
+6. 切 Offboard mode。
+7. Arm。
+8. 起飛到 takeoff_height。
+9. 進入 FORMATION。
+10. 依 formation_type 產生編隊。
+11. CPF velocity control 介入避碰。
+
+目前主要使用 centralized 模式：
+
+    control_mode: centralized
+
+也就是地面端 formation_node 統一計算三台 UAV 的 setpoint / velocity command。
+
+============================================================
+2. 為什麼直線編隊距離看起來很大
+============================================================
+
+目前 config/formation.yaml 中：
+
+    formation_type: line
+    formation_spacing: 4.0
+
+而 formation/formation_shapes.py 中 line 隊形定義為：
+
+    def line(spacing):
+        return [
+            VectorENU(0.0, 0.0, 0.0),
+            VectorENU(-spacing, 0.0, 0.0),
+            VectorENU(-2.0 * spacing, 0.0, 0.0),
+        ]
+
+也就是當 spacing = 4.0 時：
+
+    slot 1:  0 m
+    slot 2: -4 m
+    slot 3: -8 m
+
+如果 leader_id = 1，則 get_shape() 會分配成：
+
+    MAV1:  0 m
+    MAV2: -4 m
+    MAV3: -8 m
+
+所以實際看起來會是：
+
+    MAV1 到 MAV2 距離約 4 m
+    MAV2 到 MAV3 距離約 4 m
+    MAV1 到 MAV3 總長約 8 m
+
+因此你會覺得直線很長、距離很大。
+
+這不是錯誤，而是目前 spacing 設為 4.0，加上 line 隊形使用累加 offset 的結果。
+
+如果想讓直線比較短，可以改：
+
+    formation_spacing: 2.0
+
+則變成：
+
+    MAV1:  0 m
+    MAV2: -2 m
+    MAV3: -4 m
+
+如果想再短：
+
+    formation_spacing: 1.5
+
+則變成：
+
+    MAV1:  0 m
+    MAV2: -1.5 m
+    MAV3: -3.0 m
+
+但是 spacing 不能小於避碰與安全距離。
+
+============================================================
+3. x500 大小與建議 spacing
+============================================================
+
+你查到 x500 大約是：
+
+    200 mm x 200 mm
+
+但編隊安全距離不能只看機身中心尺寸，還要考慮：
+
+1. 螺旋槳範圍。
+2. Gazebo / PX4 local position 誤差。
+3. 控制器 overshoot。
+4. CPF repulsion 需要反應距離。
+5. UAV 轉向時的橫向偏移。
+
+目前比較合理的測試參數範圍：
+
+    minimum_vehicle_distance: 0.8 ~ 1.0 m
+    cpf_safe_distance: 1.2 ~ 1.5 m
+    cpf_influence_distance: 3.0 ~ 4.0 m
+    formation_spacing: 2.0 ~ 4.0 m
+
+如果只是 Gazebo 初期測試，建議：
+
+    formation_spacing: 2.0
+    minimum_vehicle_distance: 0.8
+    cpf_safe_distance: 1.2
+    cpf_influence_distance: 3.0
+
+如果要保守一點：
+
+    formation_spacing: 3.0
+    minimum_vehicle_distance: 0.8
+    cpf_safe_distance: 1.2
+    cpf_influence_distance: 3.0
+
+目前 formation_spacing = 4.0 是偏保守，所以看起來會很大。
+
+============================================================
+4. formation_shapes.py：隊形產生邏輯
+============================================================
+
+檔案：formation/formation_shapes.py
+
+目前支援四種隊形：
+
+1. triangle
+2. line
+3. v_shape
+4. column
+
+triangle：
+
+    [
+        VectorENU(0.0, 0.0, 0.0),
+        VectorENU(-spacing, spacing, 0.0),
+        VectorENU(-spacing, -spacing, 0.0),
+    ]
+
+line：
+
+    [
+        VectorENU(0.0, 0.0, 0.0),
+        VectorENU(-spacing, 0.0, 0.0),
+        VectorENU(-2.0 * spacing, 0.0, 0.0),
+    ]
+
+v_shape：
+
+    [
+        VectorENU(0.0, 0.0, 0.0),
+        VectorENU(-spacing, spacing, 0.0),
+        VectorENU(-spacing, -spacing, 0.0),
+    ]
+
+column：
+
+    [
+        VectorENU(0.0, 0.0, 0.0),
+        VectorENU(0.0, spacing, 0.0),
+        VectorENU(0.0, 2.0 * spacing, 0.0),
+    ]
+
+get_shape() 分配邏輯：
+
+    ordered_ids = [
+        leader_id,
+        其他 vehicle_id 依照 ID 由小到大排序
+    ]
+
+例如：
+
+    leader_id = 1
+    vehicle_ids = [1, 2, 3]
+
+分配：
+
+    MAV1 -> offsets[0]
+    MAV2 -> offsets[1]
+    MAV3 -> offsets[2]
+
+如果 leader_id = 2：
+
+    MAV2 -> offsets[0]
+    MAV1 -> offsets[1]
+    MAV3 -> offsets[2]
+
+============================================================
+5. formation_node.py：主流程
+============================================================
+
+檔案：formation/main_node.py
+
+FormationNode 是主控制節點。
+
+它建立三台 UAV interface：
+
+    self.vehicles = {
+        1: VehicleInterface(self, 'MAV1', 1),
+        2: VehicleInterface(self, 'MAV2', 2),
+        3: VehicleInterface(self, 'MAV3', 3),
+    }
+
+它建立 MissionManager：
+
+    負責任務狀態機。
+
+它建立 LeaderManager：
+
+    負責 leader 狀態檢查。
+
+它建立 SafetyManager：
+
+    負責距離、速度、高度、geofence、setpoint safety。
+
+它建立 CentralizedFormationController：
+
+    在 centralized 模式下，負責計算三台 UAV 的 setpoint。
+
+control_loop 頻率：
+
+    control_frequency: 100.0
+
+所以 control_loop 每 0.01 秒跑一次。
+
+control_loop 中主要流程：
+
+1. 取得三台 UAV 狀態。
+2. 如果在 FORMATION，處理 /formation/command。
+3. 檢查 leader health。
+4. 檢查目前 UAV 狀態 safety。
+5. 呼叫 mission_manager.update()。
+6. 檢查 setpoint safety。
+7. 發 OffboardControlMode。
+8. 發 TrajectorySetpoint。
+9. 必要時送 Offboard mode / Arm。
+10. 必要時送 Land command。
+
+============================================================
+6. mission_manager.py：任務狀態機
+============================================================
+
+檔案：formation/mission_manager.py
+
+任務狀態：
+
+    IDLE
+    WAITING_READY
+    OFFBOARD_WARMUP
+    TAKEOFF
+    FORMATION
+    LANDING
+    LANDED
+    EMERGENCY_LANDING
+    AWAITING_GROUND_CONFIRMATION
+    ERROR
+
+起飛流程：
+
+    IDLE
+      -> WAITING_READY
+      -> OFFBOARD_WARMUP
+      -> TAKEOFF
+      -> FORMATION
+
+WAITING_READY：
+
+    等待三台 UAV 都具備：
+
+    1. status_received
+    2. preflight_ok
+    3. position_received
+    4. position_valid
+    5. position_local_enu != None
+    6. local position 資料沒有 timeout
+
+OFFBOARD_WARMUP：
+
+    持續送 Offboard heartbeat 與 takeoff setpoint。
+    這是 PX4 Offboard mode 要求。
+
+TAKEOFF：
+
+    三台 UAV 維持 takeoff setpoint。
+    當三台都到 takeoff_height 附近，就進入 FORMATION。
+
+FORMATION：
+
+    centralized：由 CentralizedFormationController 計算 setpoint。
+    distributed：由 distributed_vehicle_node 各自計算 setpoint。
+
+LANDING：
+
+    對三台 UAV 送 NAV_LAND。
+
+EMERGENCY_LANDING：
+
+    safety 觸發時進入，整隊降落。
+
+============================================================
+7. vehicle_interface.py：PX4 topic 包裝
+============================================================
+
+檔案：formation/vehicle_interface.py
+
+VehicleInterface 負責 ROS 2 <-> PX4 topic。
+
+Publishers：
+
+    /MAVx/fmu/in/offboard_control_mode
+    /MAVx/fmu/in/trajectory_setpoint
+    /MAVx/fmu/in/vehicle_command
+
+Subscriptions：
+
+    /MAVx/fmu/out/vehicle_status_v1
+    /MAVx/fmu/out/vehicle_local_position_v1
+    /MAVx/fmu/out/vehicle_land_detected
+
+publish_offboard_heartbeat(use_velocity=False)：
+
+    如果 use_velocity = False：
+
+        OffboardControlMode.position = True
+        OffboardControlMode.velocity = False
+
+    如果 use_velocity = True：
+
+        OffboardControlMode.position = False
+        OffboardControlMode.velocity = True
+
+目前：
+
+    TAKEOFF 階段使用 position control。
+    CPF velocity mode 下，FORMATION 階段使用 velocity control。
+
+publish_setpoint(setpoint)：
+
+    如果 setpoint.velocity_local_enu != None：
+
+        TrajectorySetpoint.position = [NaN, NaN, NaN]
+        TrajectorySetpoint.velocity = v_cmd
+
+    如果 setpoint.velocity_local_enu == None：
+
+        TrajectorySetpoint.position = target position
+        TrajectorySetpoint.velocity = [NaN, NaN, NaN]
+
+座標轉換：
+
+    程式內部使用 ROS/Gazebo ENU。
+    送給 PX4 前轉成 NED。
+
+ENU：
+
+    x = East
+    y = North
+    z = Up
+
+NED：
+
+    x = North
+    y = East
+    z = Down
+
+============================================================
+8. formation_controller.py：集中式編隊控制
+============================================================
+
+檔案：formation/formation_controller.py
+
+CentralizedFormationController 做的事情：
+
+1. 根據 formation_type / formation_spacing 取得隊形 offsets。
+2. 根據 formation_reference_enu 產生 world target。
+3. 根據 vehicle_origins_enu 轉成各 UAV local target。
+4. 產生 nominal VehicleSetpoint。
+5. 如果 CPF enabled，呼叫 apply_cpf_to_setpoints()。
+6. 回傳三台 UAV 的 setpoint。
+
+目前 centralized 模式的基準點：
+
+    formation_reference_enu: [4.0, 0.0, 3.0]
+
+這代表虛擬編隊中心在 Gazebo World ENU 的：
+
+    East = 4.0
+    North = 0.0
+    Up = 3.0
+
+注意：
+
+    這不是 leader 實際位置。
+    這是地面端產生的 virtual formation reference。
+
+============================================================
+9. leader_command_node.py：Leader 高階指令
+============================================================
+
+檔案：formation/leader_command_node.py
+
+leader_command_node 訂閱：
+
+    /formation/leader_input
+
+並發布：
+
+    /formation/command
+
+指令類型由 FormationCommand.msg 定義：
+
+    HOLD = 0
+    MOVE = 1
+    SET_YAW = 2
+    MISSION_COMPLETE = 3
+    EMERGENCY_STOP = 4
+
+MOVE command 會更新 virtual formation reference：
+
+    velocity_east
+    velocity_north
+    velocity_up
+    yaw_rate
+    duration
+
+所以不是使用固定路徑，例如：
+
+    先往前 100m，再往左 100m
+
+而是使用高階速度命令與即時控制回授。
+
+============================================================
+10. CPF velocity control
+============================================================
+
+檔案：formation/cpf_avoidance.py
+
+CPF 目前是速度型控制。
+
+流程：
+
+    current position
+      -> target position
+      -> position error
+      -> attraction velocity v_formation
+
+    other UAV positions
+      -> CPF repulsion
+      -> avoidance velocity v_avoid
+
+    v_cmd = v_formation + v_avoid
+
+    v_cmd limit by cpf_max_speed
+
+    publish TrajectorySetpoint.velocity
+
+目前 CPF 參數：
+
+    cpf_enabled: true
+    cpf_attraction_gain: 0.5
+    cpf_repulsion_gain: 1.2
+    cpf_safe_distance: 1.5
+    cpf_influence_distance: 3.0
+    cpf_max_speed: 0.6
+    cpf_output_velocity: true
+
+意思：
+
+    cpf_attraction_gain:
+        目標吸引力增益。
+        越大，越快往 formation target 靠近。
+
+    cpf_repulsion_gain:
+        避碰排斥力增益。
+        越大，靠近其他 UAV 時推開越強。
+
+    cpf_safe_distance:
+        低於此距離時，排斥力會明顯增加。
+
+    cpf_influence_distance:
+        其他 UAV 在此距離內才開始影響 CPF。
+
+    cpf_max_speed:
+        CPF 輸出的最大速度。
+        目前是 0.6 m/s。
+
+    cpf_output_velocity:
+        true 表示輸出 velocity setpoint。
+
+============================================================
+11. safety_manager.py：安全檢查
+============================================================
+
+檔案：formation/safety_manager.py
+
+目前 safety 分兩類。
+
+第一類：UAV 狀態檢查 check_states()
+
+檢查：
+
+    position 是否 valid
+    position 是否 stale
+    altitude 是否超限
+    geofence 是否超限
+    實際速度是否超過 maximum_speed
+    UAV 之間距離是否小於 minimum_vehicle_distance
+
+目前參數：
+
+    minimum_vehicle_distance: 0.8
+    maximum_altitude: 20.0
+    maximum_speed: 3.0
+    geofence_radius: 50.0
+
+第二類：setpoint 檢查 check_setpoints()
+
+如果是 position setpoint：
+
+    檢查 altitude
+    檢查 geofence
+    檢查 maximum_setpoint_jump
+
+如果是 velocity setpoint：
+
+    不再檢查 position jump
+    改檢查 velocity_local_enu 是否 finite
+    檢查 v_cmd 是否超過 maximum_speed
+
+這是因為 CPF velocity mode 下，真正送給 PX4 的是 velocity，不是 position target。
+
+============================================================
+12. 目前參數總表
+============================================================
+
+formation_node：
+
+    control_frequency: 100.0
+    control_mode: centralized
+    leader_id: 1
+    formation_type: line
+    formation_spacing: 4.0
+    takeoff_height: 3.0
+    formation_reference_enu: [4.0, 0.0, 3.0]
+    formation_reference_yaw_enu: 0.0
+    command_timeout: 1.0
+
+CPF：
+
+    cpf_enabled: true
+    cpf_attraction_gain: 0.5
+    cpf_repulsion_gain: 1.2
+    cpf_safe_distance: 1.5
+    cpf_influence_distance: 3.0
+    cpf_max_speed: 0.6
+    cpf_output_velocity: true
+
+Mission：
+
+    ready_hold_duration: 2.0
+    offboard_warmup_duration: 2.0
+    local_position_timeout: 2.0
+    takeoff_altitude_tolerance: 0.3
+    land_command_interval: 1.0
+
+Safety：
+
+    minimum_vehicle_distance: 0.8
+    maximum_altitude: 20.0
+    maximum_speed: 3.0
+    geofence_radius: 50.0
+    maximum_setpoint_jump: 6.0
+    formation_position_tolerance: 0.5
+
+Vehicle origins：
+
+    MAV1: [0.0, 0.0, 0.0]
+    MAV2: [2.0, 0.0, 0.0]
+    MAV3: [0.0, 2.0, 0.0]
+
+============================================================
+13. 如何把直線距離調小
+============================================================
+
+目前 line spacing = 4.0，所以直線長度很大。
+
+可以先改：
+
+    formation_spacing: 3.0
+
+效果：
+
+    MAV1:  0 m
+    MAV2: -3 m
+    MAV3: -6 m
+
+再小一點：
+
+    formation_spacing: 2.0
+
+效果：
+
+    MAV1:  0 m
+    MAV2: -2 m
+    MAV3: -4 m
+
+如果 x500 在 Gazebo 控制穩定，可以測：
+
+    formation_spacing: 1.5
+
+效果：
+
+    MAV1:  0 m
+    MAV2: -1.5 m
+    MAV3: -3.0 m
+
+但如果 spacing 太小，需要同步調整：
+
+    cpf_safe_distance
+    cpf_influence_distance
+    minimum_vehicle_distance
+
+建議組合 A：保守穩定
+
+    formation_spacing: 3.0
+    minimum_vehicle_distance: 0.8
+    cpf_safe_distance: 1.2
+    cpf_influence_distance: 3.0
+    cpf_max_speed: 0.5
+
+建議組合 B：比較緊湊
+
+    formation_spacing: 2.0
+    minimum_vehicle_distance: 0.7
+    cpf_safe_distance: 1.0
+    cpf_influence_distance: 2.5
+    cpf_max_speed: 0.4
+
+建議組合 C：非常緊湊，需要小心
+
+    formation_spacing: 1.5
+    minimum_vehicle_distance: 0.6
+    cpf_safe_distance: 0.9
+    cpf_influence_distance: 2.0
+    cpf_max_speed: 0.3
+
+============================================================
+14. 執行流程
+============================================================
+
+Terminal 1：啟動 Micro XRCE-DDS monitor / Agent
+
+    bash /home/ncrl/ncrl_mqtt/catkin_ws/src/formation/scripts/monitor_mav_dds.sh
+
+Terminal 2：啟動 PX4 / Gazebo 三台 UAV
+
+    ros2 launch formation multi_PX4.launch.py
+
+等 monitor 顯示三台 DDS READY。
+
+Terminal 3：啟動 formation
+
+    ros2 launch formation formation.launch.py control_mode:=centralized
+
+Terminal 4：呼叫起飛
+
+    ros2 service call /formation/takeoff std_srvs/srv/Trigger "{}"
+
+任務完成降落：
+
+    ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand     "{command: 3}"
+
+============================================================
+15. 常見現象與原因
+============================================================
+
+現象：WAITING_READY 卡住
+
+原因：三台 UAV status / local position / preflight 還沒 ready。
+
+檢查：
+
+    ROS2CLI_DISABLE_DAEMON=1 ros2 topic info -v /MAV1/fmu/out/vehicle_status_v1
+    ROS2CLI_DISABLE_DAEMON=1 ros2 topic echo --once /MAV1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort
+
+------------------------------------------------------------
+
+現象：QGround 顯示 flying，但 Gazebo 不飛
+
+原因：PX4 commander 狀態改變，但 Gazebo 沒收到 motor_speed。
+
+檢查：
+
+    gz topic -e -t /model/x500_0/command/motor_speed
+    gz topic -e -t /model/x500_1/command/motor_speed
+    gz topic -e -t /model/x500_2/command/motor_speed
+
+------------------------------------------------------------
+
+現象：Vehicle speed exceeds limit
+
+原因：實際速度超過 maximum_speed。
+
+調整：
+
+    maximum_speed 調高一點，例如 3.0
+    cpf_max_speed 調低一點，例如 0.4 ~ 0.6
+
+------------------------------------------------------------
+
+現象：setpoint jump exceeds limit
+
+如果是 position setpoint：
+
+    target 離目前太遠。
+
+如果是 CPF velocity mode：
+
+    程式目前已修正，不再用 position jump 檢查 velocity setpoint。
+
+------------------------------------------------------------
+
+現象：直線距離很大
+
+原因：
+
+    formation_spacing: 4.0
+    line offsets: 0, -4, -8
+
+調整：
+
+    formation_spacing: 2.0 或 3.0
+
+============================================================
+16. 目前最重要的理解
+============================================================
+
+1. 起飛是 position control。
+2. 進入 FORMATION 後，目前 CPF 啟用 velocity control。
+3. line 編隊距離由 formation_spacing 決定。
+4. formation_spacing = 4.0 時，三台 line 總長約 8m。
+5. CPF 是避障層，不是固定路徑。
+6. Safety 是最後保護線。
+7. 如果要縮短直線，優先調 formation_spacing。
+8. 如果縮短 spacing，也要同步調低 CPF / safety 距離。

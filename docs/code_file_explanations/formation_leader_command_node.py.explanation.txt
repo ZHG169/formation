@@ -1,0 +1,38 @@
+對應檔案：formation/leader_command_node.py
+
+這份檔案的角色：
+這是 leader command relay。它不讀 PX4 leader 的實際位置，而是把地面端或 leader 上層輸入的 FormationCommand 持續發布到 `/formation/command`。集中式或分散式 controller 都可以訂閱這個 command。
+
+主要寫法：
+1. Node 名稱
+   `LeaderCommandNode` 初始化為 `leader_command_node`。
+
+2. publish_frequency
+   預設 20 Hz。這是 command 發布頻率，不一定要跟 100 Hz control_loop 一樣。一般建議：
+   - command 10~20 Hz 足夠
+   - control loop 50~100 Hz
+   因為 command 是高階意圖，setpoint 才是低階連續控制。
+
+3. publisher
+   發布 `/formation/command`，型別是 FormationCommand。
+
+4. input_subscription
+   訂閱 `/formation/leader_input`。外部如果想命令整隊移動，可以 publish FormationCommand 到這裡，leader_command_node 再轉發成 active command。
+
+5. status_subscription
+   訂閱 `/formation/status`。它需要知道目前 active leader_id 與 leader_generation，leader 變更時會重置 command。
+
+6. active_command
+   儲存目前正在持續發布的 command。如果沒有新 input，通常發布 hold command，避免 command timeout。
+
+7. timer_callback()
+   每 1/publish_frequency 秒執行一次，把 active_command 發布到 `/formation/command`。
+
+重要細節：
+- 這個 node 不應該直接訂閱 `/MAV1/fmu/out/vehicle_local_position...` 來讀 leader 位置。
+- 它發布的是「控制命令」或「高階意圖」，例如 reference velocity/yaw rate，而不是寫死路徑點序列。
+- 如果 `/formation/command` 停止超過 command_timeout，controller 會回到 hold 或不更新 reference。
+
+常見調整方向：
+- 想讓 leader command 更即時：提高 publish_frequency 到 30 Hz，但通常不需要 100 Hz。
+- 想改命令內容：看 FormationCommand.msg 欄位與 create_hold_command/leader_input_callback。

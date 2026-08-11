@@ -1,0 +1,53 @@
+對應檔案：formation/safety_manager.py
+
+這份檔案的角色：
+這是安全檢查層。它負責判斷目前狀態或 setpoint 是否危險，例如 UAV 太近、速度太快、高度太高、超出 geofence、position timeout、setpoint 突然跳太遠。若檢查失敗，main_node 會觸發整隊降落。
+
+主要寫法：
+1. SafetyViolation dataclass
+   記錄單一違規：
+   - code：錯誤代碼，例如 distance、speed、timeout
+   - message：人類可讀的錯誤訊息
+   - vehicle_ids：相關 UAV ID
+
+2. SafetyResult dataclass
+   表示整體檢查結果：
+   - safe=True/False
+   - critical=True/False
+   - message：錯誤摘要
+   - violations：所有違規列表
+
+3. SafetyManager.__init__
+   讀入安全限制：
+   - vehicle_origins：local/world 轉換必需
+   - position_timeout
+   - minimum_distance
+   - maximum_altitude
+   - maximum_speed
+   - geofence_radius
+   - maximum_setpoint_jump
+
+4. check_states(states, now_ns)
+   檢查「目前 UAV 狀態」：
+   - 有沒有 origin
+   - position 是否收到、是否有效、是否 timeout
+   - altitude 是否超過 maximum_altitude
+   - speed 是否超過 maximum_speed
+   - 任兩台 UAV 距離是否小於 minimum_distance
+   - 是否超出 geofence
+
+5. check_setpoints(setpoints)
+   檢查「即將送出的 setpoint」。目前有特別區分：
+   - position setpoint：檢查高度、geofence、setpoint jump
+   - velocity setpoint：不再用 position jump 判斷，改檢查 velocity 是否有限、速度是否超過 maximum_speed
+   這是之前針對 CPF velocity control 修正的重點。
+
+重要細節：
+- 你遇到 `Vehicle 3 speed 2.02 m/s exceeds limit` 就是這裡的 maximum_speed 觸發。
+- 你遇到 `Vehicles 1 and 2 are 1.50 m apart` 就是 minimum_vehicle_distance 觸發。
+- 對 X500 模擬尺寸而言，minimum_vehicle_distance 設太大會讓剛起飛就很容易觸發；但太小又沒保護。
+
+常見調整方向：
+- 如果 safety 太敏感：降低 minimum_vehicle_distance 或增加 formation_spacing。
+- 如果速度太常超限：降低 CPF max speed 或提高 maximum_speed，但建議先降低控制輸出。
+- 如果 setpoint jump 觸發：檢查 vehicle_origins_enu 與 Gazebo spawn pose 是否一致。

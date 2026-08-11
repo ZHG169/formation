@@ -1,0 +1,20 @@
+對應檔案：scripts/distributed_vehicle_node
+
+這份檔案的角色：
+這是 distributed_vehicle_node 的 ROS 2 executable wrapper。分散式模式 launch 三個節點時，實際執行入口就是它。
+
+主要寫法：
+通常只是 import `formation.distributed_vehicle_node.main` 並執行。
+
+重要細節：
+- 它本身沒有控制邏輯。
+- 真正單機分散式控制請看 formation/distributed_vehicle_node.py。
+
+目前檔案實際內容：
+#!/usr/bin/env python3
+
+from formation.distributed_vehicle_node import main
+
+
+if __name__ == '__main__':
+    main()

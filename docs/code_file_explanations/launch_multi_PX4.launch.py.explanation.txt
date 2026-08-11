@@ -1,0 +1,41 @@
+對應檔案：launch/multi_PX4.launch.py
+
+這份檔案的角色：
+這是啟動三台 PX4 SITL + Gazebo 模型的 launch 檔。它和 formation.launch.py 分開，讓模擬端與控制端可以獨立重啟與除錯。
+
+主要寫法：
+1. PX4_DIR / PX4_BINARY
+   指定 PX4-Autopilot 路徑與 px4 binary。若路徑錯誤，launch 會找不到執行檔。
+
+2. create_px4_instance(instance, drone_name, pose, standalone)
+   建立單台 PX4 process。每台主要差異：
+   - instance：0/1/2
+   - drone_name：MAV1/MAV2/MAV3
+   - pose：Gazebo 初始位置
+   - standalone：是否使用已存在 Gazebo world
+
+3. env 環境變數
+   - ROS_DOMAIN_ID=0：必須和 MicroXRCEAgent、ROS 2 node 一致
+   - PX4_SYS_AUTOSTART=4001：x500 quadrotor autostart
+   - PX4_GZ_MODEL=gz_x500：Gazebo 模型
+   - PX4_GZ_MODEL_POSE：生成位置
+   - PX4_UXRCE_DDS_NS=MAV1/MAV2/MAV3：ROS topic namespace
+   - PX4_UXRCE_DDS_PORT=8888：三台 PX4 都連到同一個 MicroXRCEAgent UDP port
+
+4. PX4_GZ_STANDALONE
+   MAV1 不設 standalone，讓它啟動 Gazebo world。MAV2/MAV3 設 standalone，表示使用已經存在的 Gazebo，而不是各自再開一個 world。
+
+5. TimerAction
+   MAV1 先啟動，MAV2 延遲，MAV3 再延遲。這樣可以降低 Gazebo 同時 spawn 多台模型造成的競爭與 sensor/bridge 問題。
+
+6. shutdown_if_process_exits
+   如果任何一個 PX4 非預期退出，就關掉整個 launch，避免下一次重啟時舊 process 和新 process 混在一起。
+
+重要細節：
+- 你之前遇到需要重開 container 才能三台連上，通常和殘留 px4/gz_bridge/gz sim/MicroXRCEAgent 或 UDP port/namespace 混亂有關。
+- `PX4_UXRCE_DDS_PORT=8888` 表示所有 PX4 client 都往同一個 Agent 連。不同 instance 會用不同 key/system id，不需要每台一個 Agent。
+- QGround 只看到一台時，不一定是 px4 沒起來，也可能是 MAVLink UDP 14550/14580~ 或 sysid/連線轉發問題。
+
+常見調整方向：
+- MAV3 sensor missing：增加 TimerAction 延遲、確認 Gazebo world 沒殘留、確認模型名稱沒有衝突。
+- Gazebo 不出來：確認沒有殘留 headless gz sim、GUI 是否已啟動、PX4_GZ_MODEL 是否正確。

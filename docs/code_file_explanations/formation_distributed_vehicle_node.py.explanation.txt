@@ -1,0 +1,50 @@
+對應檔案：formation/distributed_vehicle_node.py
+
+這份檔案的角色：
+這是分散式控制模式使用的單機控制節點。每一台 UAV 會有一個 distributed_vehicle_node，各自訂閱自己的 PX4 local position，接收共同 `/formation/command`，再自己算自己的 setpoint。
+
+主要寫法：
+1. 參數宣告
+   包含：
+   - control_frequency
+   - vehicle_id
+   - namespace
+   - vehicle_origin_enu
+   - vehicle_ids / vehicle_names / vehicle_origins_enu
+   - formation_type / formation_spacing
+   - formation_reference_enu / yaw
+   - command_timeout
+   - cpf_* 參數
+
+2. VehicleInterface
+   每個 distributed node 只建立自己的 VehicleInterface，例如 vehicle_id=2 namespace=MAV2。
+
+3. command subscription
+   訂閱 `/formation/command`。它用 command 來更新 formation reference，而不是讀 leader 實際位置。
+
+4. status subscription
+   訂閱 `/formation/status`。確認任務是否已進入 FORMATION，以及目前 leader_id。
+
+5. other vehicle local position subscriptions
+   為了 CPF 避障，分散式節點可能也會讀其他 UAV 的位置。這是為了知道周圍障礙/隊友在哪裡，不是拿 leader 位置當目標路徑。
+
+6. control_loop
+   每 1/control_frequency 秒執行：
+   - 檢查任務狀態是否允許控制
+   - 檢查 command timeout
+   - 根據 FormationCommand 推進 reference
+   - get_shape() 取得自己的 offset
+   - reference + offset 得到 target_world
+   - target_world - own_origin 得到 target_local
+   - 若 CPF enabled，套用避障速度
+   - publish offboard heartbeat 與 setpoint
+
+重要細節：
+- 分散式模式下，formation_node 在 FORMATION 階段會避免和 distributed node 同時發布 setpoint，以免同一台 PX4 收到兩個控制源互相打架。
+- 每台 distributed node 的參數名稱要對應 YAML：distributed_vehicle_1、distributed_vehicle_2、distributed_vehicle_3。
+- 如果 launch 裡三個 distributed node 都用相同 node name，ROS 會混亂；目前 launch 會命名為 distributed_vehicle_1/2/3。
+
+常見調整方向：
+- 分散式某台不動：先看它的 namespace、vehicle_id 是否對應。
+- CPF 避障不明顯：檢查它是否有收到其他 UAV position。
+- command timeout：提高 command_timeout 或確認 leader_command_node 有跑。

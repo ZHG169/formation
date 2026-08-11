@@ -1,0 +1,35 @@
+對應檔案：msg/FormationError.msg
+
+這份檔案的角色：
+這是 formation 錯誤/安全事件用的自訂訊息。它可以用來把 SafetyManager 或任務錯誤整理成 ROS topic，方便地面站或 logger 記錄。
+
+主要寫法：
+一般會包含：
+- error code
+- message
+- vehicle id(s)
+- severity
+- timestamp
+
+實際意義：
+當發生例如：
+- vehicle distance too close
+- speed exceeds limit
+- position timeout
+- leader failed
+就可以用 FormationError 表達，而不是只靠 console log。
+
+重要細節：
+- 如果目前 main_node 尚未完整發布這個 msg，它仍可作為後續擴充介面。
+- msg 改動後要重新 build。
+
+常見調整方向：
+- 想讓 QGround/地面端更容易 debug：增加錯誤 topic publisher。
+
+目前檔案實際內容：
+builtin_interfaces/Time stamp
+
+uint8 vehicle_id
+uint16 error_code
+string description
+bool critical

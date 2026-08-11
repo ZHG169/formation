@@ -1,0 +1,1333 @@
+目前程式碼寫法導讀
+日期：2026-08-11
+
+這份文件不是系統架構說明，而是針對目前 formation package 的 Python 程式碼寫法做導讀。
+目標是幫助你看懂：為什麼這樣寫、每個 class/function/變數在做什麼、資料怎麼在程式中流動。
+
+============================================================
+1. 先看懂幾個 Python / ROS 2 寫法
+============================================================
+
+------------------------------------------------------------
+1.1 import 的意思
+------------------------------------------------------------
+
+例如 main_node.py 開頭：
+
+    import rclpy
+    from rclpy.node import Node
+    from std_srvs.srv import Trigger
+
+意思是：
+
+    import rclpy
+        載入 ROS 2 Python client library。
+
+    from rclpy.node import Node
+        從 rclpy.node 裡拿 Node class。
+        你的 FormationNode 會繼承 Node，才能建立 publisher、subscriber、service、timer。
+
+    from std_srvs.srv import Trigger
+        使用 ROS 2 標準 Trigger service。
+        Trigger request 沒有內容，response 有 success 和 message。
+
+------------------------------------------------------------
+1.2 class FormationNode(Node)
+------------------------------------------------------------
+
+    class FormationNode(Node):
+
+這代表 FormationNode 是一個 ROS 2 node。
+
+因為繼承 Node，所以 FormationNode 內可以呼叫：
+
+    self.create_publisher(...)
+    self.create_subscription(...)
+    self.create_service(...)
+    self.create_timer(...)
+    self.get_logger().info(...)
+    self.get_clock().now()
+
+------------------------------------------------------------
+1.3 __init__ 是建構子
+------------------------------------------------------------
+
+    def __init__(self):
+        super().__init__('formation_node')
+
+__init__ 會在 node 被建立時執行一次。
+
+    super().__init__('formation_node')
+
+意思是呼叫 Node 的建構子，並把 ROS node 名稱設定成：
+
+    formation_node
+
+所以你 ros2 node list 會看到 formation_node。
+
+------------------------------------------------------------
+1.4 self 是什麼
+------------------------------------------------------------
+
+Python class 裡面第一個參數通常叫 self。
+
+    self.vehicles
+    self.mission_manager
+    self.controller
+
+這些都是 FormationNode 物件自己的變數。
+
+如果寫成：
+
+    frequency = 100.0
+
+這只是 __init__ 裡面的區域變數。
+
+如果寫成：
+
+    self.control_period = 1.0 / frequency
+
+這個值之後其他 function 也可以用。
+
+============================================================
+2. dataclass 寫法
+============================================================
+
+------------------------------------------------------------
+2.1 VehicleState
+------------------------------------------------------------
+
+檔案：formation/vehicle_interface.py
+
+    @dataclass
+    class VehicleState:
+        vehicle_id: int
+        namespace: str
+        position_local_enu: Optional[VectorENU] = None
+        velocity_local_enu: Optional[VectorENU] = None
+        yaw_local_enu: float = 0.0
+        armed: bool = False
+        landed: bool = False
+        preflight_ok: bool = False
+        position_valid: bool = False
+
+@dataclass 是 Python 的簡化寫法。
+
+它會自動幫你產生 __init__，所以你可以直接：
+
+    state = VehicleState(vehicle_id=1, namespace='MAV1')
+
+不需要自己寫：
+
+    def __init__(...):
+        self.vehicle_id = vehicle_id
+        ...
+
+VehicleState 是用來存「目前 UAV 狀態」。
+
+例如：
+
+    position_local_enu
+        PX4 local position 轉成 ROS ENU 後的位置。
+
+    velocity_local_enu
+        PX4 local velocity 轉成 ROS ENU 後的速度。
+
+    armed
+        PX4 是否已 Arm。
+
+    preflight_ok
+        PX4 preflight check 是否通過。
+
+    offboard_enabled
+        PX4 是否已經進入 Offboard mode。
+
+------------------------------------------------------------
+2.2 VehicleSetpoint
+------------------------------------------------------------
+
+    @dataclass
+    class VehicleSetpoint:
+        position_local_enu: VectorENU
+        yaw_local_enu: float
+        velocity_local_enu: Optional[VectorENU] = None
+
+VehicleSetpoint 是用來存「要送給 UAV 的目標」。
+
+目前有兩種用法：
+
+1. position mode：
+
+    velocity_local_enu = None
+
+    表示真正要送的是 position。
+
+2. velocity mode：
+
+    velocity_local_enu = VectorENU(...)
+
+    表示真正要送的是 velocity。
+    position_local_enu 只當作 fallback/reference，不是主要控制命令。
+
+============================================================
+3. coordinate_convert.py 寫法
+============================================================
+
+這個檔案處理 ROS ENU 和 PX4 NED 轉換。
+
+------------------------------------------------------------
+3.1 VectorENU / VectorNED
+------------------------------------------------------------
+
+    @dataclass
+    class VectorENU:
+        east: float
+        north: float
+        up: float
+
+    @dataclass
+    class VectorNED:
+        north: float
+        east: float
+        down: float
+
+這兩個 class 讓座標比較清楚。
+
+不用寫：
+
+    position[0]
+    position[1]
+    position[2]
+
+而是寫：
+
+    position.east
+    position.north
+    position.up
+
+可讀性比較高。
+
+------------------------------------------------------------
+3.2 enu_to_ned
+------------------------------------------------------------
+
+    def enu_to_ned(vector: VectorENU) -> VectorNED:
+        return VectorNED(
+            north=vector.north,
+            east=vector.east,
+            down=-vector.up,
+        )
+
+ROS/Gazebo ENU：
+
+    x = East
+    y = North
+    z = Up
+
+PX4 NED：
+
+    x = North
+    y = East
+    z = Down
+
+所以轉換是：
+
+    NED north = ENU north
+    NED east  = ENU east
+    NED down  = - ENU up
+
+------------------------------------------------------------
+3.3 yaw_enu_to_ned
+------------------------------------------------------------
+
+    return normalize_angle(math.pi / 2.0 - yaw_enu)
+
+因為 ENU yaw=0 是 East，NED yaw=0 是 North。
+所以 yaw 要做 90 度轉換。
+
+============================================================
+4. vehicle_interface.py 寫法
+============================================================
+
+VehicleInterface 是 PX4 topic 的包裝。
+
+每一台 UAV 都有一個 VehicleInterface。
+
+------------------------------------------------------------
+4.1 __init__ 裡建立 publisher/subscriber
+------------------------------------------------------------
+
+    input_prefix = f'/{namespace}/fmu/in'
+    output_prefix = f'/{namespace}/fmu/out'
+
+如果 namespace = 'MAV1'：
+
+    input_prefix  = /MAV1/fmu/in
+    output_prefix = /MAV1/fmu/out
+
+所以 publisher 會是：
+
+    /MAV1/fmu/in/offboard_control_mode
+    /MAV1/fmu/in/trajectory_setpoint
+    /MAV1/fmu/in/vehicle_command
+
+subscriber 會是：
+
+    /MAV1/fmu/out/vehicle_status_v1
+    /MAV1/fmu/out/vehicle_local_position_v1
+    /MAV1/fmu/out/vehicle_land_detected
+
+------------------------------------------------------------
+4.2 QoSProfile
+------------------------------------------------------------
+
+    qos = QoSProfile(
+        reliability=ReliabilityPolicy.BEST_EFFORT,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+    )
+
+PX4 ROS 2 topic 通常用 BEST_EFFORT。
+如果 QoS 不對，有時 topic 名稱存在，但 echo 不到資料。
+
+------------------------------------------------------------
+4.3 status_callback
+------------------------------------------------------------
+
+    def status_callback(self, message):
+        self.state.status_received = True
+        self.state.preflight_ok = bool(message.pre_flight_checks_pass)
+        self.state.armed = (
+            message.arming_state == VehicleStatus.ARMING_STATE_ARMED
+        )
+        self.state.nav_state = int(message.nav_state)
+        self.state.offboard_enabled = (
+            message.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+        )
+
+這個 function 是 subscriber callback。
+
+每次 PX4 發 vehicle_status_v1，這個 callback 就會被 ROS 2 自動呼叫。
+
+它把 PX4 message 轉成自己程式內部的 VehicleState。
+
+------------------------------------------------------------
+4.4 position_callback
+------------------------------------------------------------
+
+position_callback 做幾件事：
+
+1. 標記收到 position：
+
+    self.state.position_received = True
+
+2. 檢查資料是不是 finite：
+
+    math.isfinite(...)
+
+這避免 NaN / Inf 進控制器。
+
+3. 檢查 PX4 local position 是否 valid：
+
+    message.xy_valid
+    message.z_valid
+    message.v_xy_valid
+    message.v_z_valid
+
+4. 把 NED 轉 ENU：
+
+    position_ned = VectorNED(
+        north=float(message.x),
+        east=float(message.y),
+        down=float(message.z),
+    )
+
+    self.state.position_local_enu = ned_to_enu(position_ned)
+
+PX4 的 local_position_v1 是 NED。
+程式內部想用 ROS/Gazebo ENU，所以一收到就轉。
+
+------------------------------------------------------------
+4.5 publish_offboard_heartbeat
+------------------------------------------------------------
+
+    def publish_offboard_heartbeat(self, use_velocity=False):
+        message = OffboardControlMode()
+        message.position = not bool(use_velocity)
+        message.velocity = bool(use_velocity)
+
+如果 use_velocity=False：
+
+    position=True
+    velocity=False
+
+代表 PX4 Offboard position control。
+
+如果 use_velocity=True：
+
+    position=False
+    velocity=True
+
+代表 PX4 Offboard velocity control。
+
+------------------------------------------------------------
+4.6 publish_setpoint
+------------------------------------------------------------
+
+    if setpoint.velocity_local_enu is not None:
+        velocity_ned = enu_to_ned(setpoint.velocity_local_enu)
+        message.position = [math.nan, math.nan, math.nan]
+        message.velocity = velocity_ned.as_list()
+    else:
+        target_ned = enu_to_ned(setpoint.position_local_enu)
+        message.position = target_ned.as_list()
+        message.velocity = [math.nan, math.nan, math.nan]
+
+PX4 TrajectorySetpoint 的慣例是：
+
+    不使用的欄位填 NaN。
+
+所以 velocity mode：
+
+    position = NaN
+    velocity = v_cmd
+
+position mode：
+
+    position = target
+    velocity = NaN
+
+============================================================
+5. mission_manager.py 寫法
+============================================================
+
+MissionManager 是狀態機。
+
+------------------------------------------------------------
+5.1 Enum MissionState
+------------------------------------------------------------
+
+    class MissionState(Enum):
+        IDLE = auto()
+        WAITING_READY = auto()
+        OFFBOARD_WARMUP = auto()
+        TAKEOFF = auto()
+        FORMATION = auto()
+        LANDING = auto()
+
+Enum 讓狀態比較清楚。
+
+不用寫字串：
+
+    'takeoff'
+
+而是寫：
+
+    MissionState.TAKEOFF
+
+比較不容易打錯。
+
+------------------------------------------------------------
+5.2 MissionOutput
+------------------------------------------------------------
+
+    @dataclass
+    class MissionOutput:
+        setpoints: Dict[int, VehicleSetpoint] = field(default_factory=dict)
+        publish_offboard: bool = False
+        set_offboard_and_arm: bool = False
+        land_all: bool = False
+
+MissionManager 不直接 publish topic。
+
+它只回傳「這一輪要做什麼」。
+
+例如：
+
+    output.publish_offboard = True
+    output.setpoints = {...}
+
+main_node 收到 output 後，才真的去 publish。
+
+這樣寫的好處：
+
+    MissionManager 只管邏輯。
+    FormationNode 只管 ROS 2 topic/service。
+
+責任比較清楚。
+
+------------------------------------------------------------
+5.3 request_takeoff
+------------------------------------------------------------
+
+    def request_takeoff(self):
+        if self.state not in {MissionState.IDLE, MissionState.LANDED}:
+            return False
+
+        self.state = MissionState.WAITING_READY
+        ...
+        return True
+
+這是 /formation/takeoff service 會呼叫的 function。
+
+它先檢查目前狀態能不能起飛。
+
+只有：
+
+    IDLE
+    LANDED
+
+可以接受起飛。
+
+如果現在已經 TAKEOFF / FORMATION，就拒絕。
+
+------------------------------------------------------------
+5.4 _state_is_ready
+------------------------------------------------------------
+
+    if not (
+        state.status_received
+        and state.preflight_ok
+        and state.position_received
+        and state.position_valid
+        and state.position_local_enu is not None
+    ):
+        return False
+
+這段是 WAITING_READY 的核心。
+
+每台 UAV 必須同時滿足：
+
+    有收到 status
+    preflight ok
+    有收到 position
+    position valid
+    position 不是 None
+
+再檢查資料時間：
+
+    age_seconds = (now_ns - state.last_position_update_ns) / 1e9
+    return 0.0 <= age_seconds <= self.position_timeout
+
+如果資料太舊，也不 ready。
+
+------------------------------------------------------------
+5.5 _capture_takeoff_setpoints
+------------------------------------------------------------
+
+    self.takeoff_setpoints = {
+        vehicle_id: VehicleSetpoint(
+            position_local_enu=VectorENU(
+                east=0.0,
+                north=0.0,
+                up=self.takeoff_height,
+            ),
+            yaw_local_enu=state.yaw_local_enu,
+        )
+        for vehicle_id, state in states.items()
+    }
+
+這是 dict comprehension。
+
+意思是對每一台 UAV 建立一個 takeoff setpoint。
+
+每台都是：
+
+    local east = 0
+    local north = 0
+    local up = takeoff_height
+
+也就是各自在自己的 local origin 上方起飛。
+
+------------------------------------------------------------
+5.6 update()
+------------------------------------------------------------
+
+update() 是狀態機的主函式。
+
+每次 control_loop 都會呼叫：
+
+    output = self.mission_manager.update(...)
+
+它根據目前 state 回傳不同 MissionOutput。
+
+例如 WAITING_READY：
+
+    如果還沒 all_ready，return 空 output。
+    如果 all_ready 持續 ready_hold_duration，進 OFFBOARD_WARMUP。
+
+OFFBOARD_WARMUP：
+
+    持續 publish offboard 和 takeoff setpoints。
+    時間到後 output.set_offboard_and_arm = True。
+
+TAKEOFF：
+
+    持續發 takeoff setpoint。
+    如果三台都到高度，進 FORMATION。
+
+FORMATION：
+
+    output.setpoints = controller.calculate(...)
+
+LANDING：
+
+    output.land_all = True
+
+============================================================
+6. formation_shapes.py 寫法
+============================================================
+
+line：
+
+    def line(spacing):
+        return [
+            VectorENU(0.0, 0.0, 0.0),
+            VectorENU(-spacing, 0.0, 0.0),
+            VectorENU(-2.0 * spacing, 0.0, 0.0),
+        ]
+
+這代表三個 slot。
+
+如果 spacing = 4：
+
+    slot0 = 0
+    slot1 = -4
+    slot2 = -8
+
+get_shape：
+
+    vehicle_ids = sorted(set(vehicle_ids))
+
+先把 vehicle id 排序。
+
+    ordered_ids = [
+        leader_id,
+        *(vehicle_id for vehicle_id in vehicle_ids if vehicle_id != leader_id),
+    ]
+
+這段意思是：
+
+    第一個一定是 leader。
+    後面是其他 UAV，照 id 排序。
+
+最後：
+
+    return {
+        vehicle_id: offsets[index]
+        for index, vehicle_id in enumerate(ordered_ids)
+    }
+
+這也是 dict comprehension。
+
+把 ordered_ids 和 offsets 配在一起。
+
+============================================================
+7. formation_controller.py 寫法
+============================================================
+
+------------------------------------------------------------
+7.1 小工具 function
+------------------------------------------------------------
+
+    add_vectors(first, second)
+    subtract_vectors(first, second)
+    rotate_offset(offset, yaw_enu)
+    vector_distance(first, second)
+
+這些是向量運算。
+
+例如：
+
+    target_world = add_vectors(reference, rotated_offset)
+
+意思是：
+
+    世界座標中的目標位置 = 編隊中心 + 隊形 offset
+
+------------------------------------------------------------
+7.2 FormationReference
+------------------------------------------------------------
+
+    @dataclass(frozen=True)
+    class FormationReference:
+        position_world_enu: VectorENU
+        yaw_enu: float = 0.0
+
+FormationReference 是編隊中心。
+
+frozen=True 的意思是這個 dataclass 建立後不應該直接改欄位。
+
+如果要更新 reference，會建立一個新的 FormationReference。
+
+------------------------------------------------------------
+7.3 advance_reference
+------------------------------------------------------------
+
+    return FormationReference(
+        position_world_enu=VectorENU(
+            east=reference.position_world_enu.east + velocity_enu.east * dt_seconds,
+            north=reference.position_world_enu.north + velocity_enu.north * dt_seconds,
+            up=reference.position_world_enu.up + velocity_enu.up * dt_seconds,
+        ),
+        yaw_enu=normalize_yaw(reference.yaw_enu + yaw_rate * dt_seconds),
+    )
+
+這是速度積分。
+
+如果 leader command 給：
+
+    velocity_east = 0.2
+    dt = 0.01
+
+每一輪 reference.east 增加：
+
+    0.2 * 0.01 = 0.002 m
+
+100 Hz 下，一秒就是 0.2 m。
+
+------------------------------------------------------------
+7.4 CentralizedFormationController.__init__
+------------------------------------------------------------
+
+    self.formation_type = str(formation_type)
+    self.spacing = float(spacing)
+    self.vehicle_origins = dict(vehicle_origins or {})
+    self.formation_reference = formation_reference
+    self.control_period = float(control_period)
+    self.cpf_config = cpf_config or CpfConfig()
+
+這裡把外部傳進來的參數存成物件變數。
+
+    vehicle_origins or {}
+
+意思是如果 vehicle_origins 是 None，就用空 dict。
+
+------------------------------------------------------------
+7.5 calculate()
+------------------------------------------------------------
+
+calculate 是集中式編隊的核心。
+
+先檢查 leader 狀態有沒有在 states 裡：
+
+    if leader_id not in states:
+        raise ValueError(...)
+
+再檢查每台車的 position 是否 valid：
+
+    for vehicle_id, state in states.items():
+        if not state.position_valid or state.position_local_enu is None:
+            raise ValueError(...)
+
+接著取得隊形 offset：
+
+    offsets = get_shape(
+        name=self.formation_type,
+        spacing=self.spacing,
+        vehicle_ids=states,
+        leader_id=leader_id,
+    )
+
+注意：
+
+    vehicle_ids=states
+
+states 是 dict，當 dict 被拿去迭代時，會迭代 key。
+
+所以這裡等同傳入：
+
+    [1, 2, 3]
+
+接著對每台 UAV 算 target：
+
+    rotated_offset = rotate_offset(offsets[vehicle_id], self.formation_reference.yaw_enu)
+
+如果編隊 yaw 有旋轉，offset 也要旋轉。
+
+    target_world = add_vectors(self.formation_reference.position_world_enu, rotated_offset)
+
+世界目標 = 編隊中心 + offset。
+
+    target_local = subtract_vectors(target_world, self.vehicle_origins[vehicle_id])
+
+因為每台 PX4 local origin 不同，所以要轉成該 UAV 的 local setpoint。
+
+最後建立 VehicleSetpoint：
+
+    commands[vehicle_id] = VehicleSetpoint(
+        position_local_enu=target_local,
+        yaw_local_enu=self.formation_reference.yaw_enu,
+    )
+
+最後呼叫 CPF：
+
+    return apply_cpf_to_setpoints(...)
+
+如果 CPF 關閉，就原封不動回傳 commands。
+如果 CPF 開啟，就把 position target 轉成 velocity setpoint。
+
+============================================================
+8. cpf_avoidance.py 寫法
+============================================================
+
+CPF 檔案的目的：
+
+    nominal formation setpoint
+    + current UAV positions
+    -> v_formation + v_avoid
+    -> velocity setpoint
+
+------------------------------------------------------------
+8.1 CpfConfig
+------------------------------------------------------------
+
+    @dataclass(frozen=True)
+    class CpfConfig:
+        enabled: bool = False
+        attraction_gain: float = 0.8
+        repulsion_gain: float = 1.2
+        safe_distance: float = 1.5
+        influence_distance: float = 4.0
+        max_speed: float = 0.8
+        output_velocity: bool = True
+
+這個 dataclass 專門放 CPF 參數。
+
+------------------------------------------------------------
+8.2 vector_norm / horizontal_norm
+------------------------------------------------------------
+
+    vector_norm(vector)
+
+算 3D 長度：
+
+    sqrt(east^2 + north^2 + up^2)
+
+    horizontal_norm(vector)
+
+只算水平距離：
+
+    sqrt(east^2 + north^2)
+
+CPF 避碰目前用 horizontal distance，因為主要避 UAV 水平碰撞。
+
+------------------------------------------------------------
+8.3 limit_vector
+------------------------------------------------------------
+
+    def limit_vector(vector, max_norm):
+        norm = vector_norm(vector)
+        if norm <= max_norm or norm <= 1e-6:
+            return vector
+        return scale_vector(vector, max_norm / norm)
+
+這是速度限制器。
+
+如果速度太大，就等比例縮小。
+
+例如 vector 長度 2.0，max_norm 0.5：
+
+    scale = 0.5 / 2.0 = 0.25
+
+最後整個向量變成原本的 25%。
+
+------------------------------------------------------------
+8.4 repulsion_from_neighbors
+------------------------------------------------------------
+
+這是 CPF 避碰核心。
+
+    for other_id, other_position in current_world.items():
+
+對每一台其他 UAV 算排斥力。
+
+    if other_id == vehicle_id:
+        continue
+
+跳過自己。
+
+    away = subtract_vectors(own_position, other_position)
+
+away 是「從其他 UAV 指向自己」的向量。
+
+    distance = horizontal_norm(away)
+
+只看水平距離。
+
+    if distance >= config.influence_distance:
+        continue
+
+如果距離太遠，就不產生排斥。
+
+    direction = away / distance
+
+把 away 轉成單位向量。
+
+    base_strength = ((1/d) - (1/influence)) / d^2
+
+距離越近，排斥力越大。
+
+    if distance < config.safe_distance:
+        strength += extra
+
+如果進入 safe_distance，再額外加強排斥。
+
+最後：
+
+    repulsion = repulsion + direction * strength
+
+------------------------------------------------------------
+8.5 apply_cpf_to_setpoints
+------------------------------------------------------------
+
+這個 function 會對每一台 UAV 做 CPF。
+
+如果 CPF 沒開：
+
+    if not config.enabled:
+        return nominal_setpoints
+
+先建立 current_world：
+
+    current_world[vehicle_id] = world_position(state, origin)
+
+也就是把每台 UAV 目前 local position 轉成 world position。
+
+對每個 nominal setpoint：
+
+    current = current_world[vehicle_id]
+    target = setpoint_world_position(nominal_setpoint, origin)
+
+attraction：
+
+    attraction = (target - current) * attraction_gain
+    attraction = limit_vector(attraction, max_speed)
+
+repulsion：
+
+    repulsion = repulsion_from_neighbors(...)
+
+合成速度：
+
+    velocity = limit_vector(attraction + repulsion, max_speed)
+
+如果 output_velocity=True：
+
+    VehicleSetpoint(
+        position_local_enu=state.position_local_enu,
+        yaw_local_enu=nominal_setpoint.yaw_local_enu,
+        velocity_local_enu=velocity,
+    )
+
+注意這裡：
+
+    position_local_enu 放目前位置。
+    velocity_local_enu 才是真正送給 PX4 的速度。
+
+============================================================
+9. main_node.py 的 control_loop 寫法
+============================================================
+
+control_loop 是整個系統最重要的 callback。
+
+它由 timer 觸發：
+
+    self.timer = self.create_timer(
+        self.control_period,
+        self.control_loop,
+    )
+
+如果 control_frequency = 100：
+
+    control_period = 0.01 秒
+
+所以每 0.01 秒跑一次 control_loop。
+
+------------------------------------------------------------
+9.1 收集 states
+------------------------------------------------------------
+
+    states = {
+        vehicle_id: vehicle.get_state()
+        for vehicle_id, vehicle in self.vehicles.items()
+    }
+
+這是 dict comprehension。
+
+self.vehicles 是：
+
+    {
+        1: VehicleInterface(...),
+        2: VehicleInterface(...),
+        3: VehicleInterface(...),
+    }
+
+執行後 states 會變成：
+
+    {
+        1: VehicleState(...),
+        2: VehicleState(...),
+        3: VehicleState(...),
+    }
+
+------------------------------------------------------------
+9.2 process_formation_command
+------------------------------------------------------------
+
+    if self.mission_manager.state == MissionState.FORMATION:
+        self.process_formation_command(now_ns)
+
+只有 FORMATION 階段才處理 leader command。
+
+例如 MOVE command 會呼叫：
+
+    self.controller.apply_velocity_command(...)
+
+這會更新 virtual formation reference。
+
+------------------------------------------------------------
+9.3 leader health check
+------------------------------------------------------------
+
+    leader_check = self.leader_manager.check_leader(...)
+
+如果 leader 失效，就 request_fault_landing。
+
+寫法：
+
+    if self.mission_manager.request_fault_landing(reason):
+        self.get_logger().error(...)
+
+request_fault_landing 回傳 True 才印 log，避免一直重複印。
+
+------------------------------------------------------------
+9.4 safety check
+------------------------------------------------------------
+
+    safety_result = self.safety_manager.check_states(states, now_ns)
+
+這是檢查目前 UAV 狀態。
+
+如果不安全：
+
+    self.mission_manager.request_fault_landing(reason)
+
+------------------------------------------------------------
+9.5 mission_manager.update
+------------------------------------------------------------
+
+    output = self.mission_manager.update(...)
+
+MissionManager 不直接 publish。
+它只回傳 output。
+
+FormationNode 再照 output 做動作。
+
+------------------------------------------------------------
+9.6 publish heartbeat 和 setpoint
+------------------------------------------------------------
+
+    if output.publish_offboard:
+        for vehicle_id, vehicle in self.vehicles.items():
+            setpoint = output.setpoints.get(vehicle_id)
+            use_velocity = bool(
+                setpoint is not None
+                and setpoint.velocity_local_enu is not None
+            )
+            vehicle.publish_offboard_heartbeat(use_velocity=use_velocity)
+
+這段會根據 setpoint 是否有 velocity_local_enu 決定 OffboardControlMode。
+
+如果是 takeoff position setpoint：
+
+    use_velocity = False
+
+如果是 CPF velocity setpoint：
+
+    use_velocity = True
+
+然後：
+
+    for vehicle_id, setpoint in output.setpoints.items():
+        self.vehicles[vehicle_id].publish_setpoint(setpoint)
+
+把每台 UAV 的 setpoint 發出去。
+
+------------------------------------------------------------
+9.7 Arm / Land
+------------------------------------------------------------
+
+    if output.set_offboard_and_arm:
+        for vehicle in self.vehicles.values():
+            vehicle.set_offboard_mode()
+        for vehicle in self.vehicles.values():
+            vehicle.arm()
+
+先切 Offboard，再 Arm。
+
+    if output.land_all:
+        for vehicle in self.vehicles.values():
+            vehicle.land()
+
+三台一起送 land。
+
+============================================================
+10. process_formation_command 寫法
+============================================================
+
+    def command_callback(self, message):
+        if int(message.leader_id) != self.leader_manager.leader_id:
+            return
+
+這是保護。
+如果 command 不是目前 leader 發出的，就忽略。
+
+    if int(message.leader_generation) != self.leader_manager.leader_generation:
+        return
+
+這也是保護。
+避免 leader 換人後，舊 command 還被使用。
+
+    self.latest_command = message
+    self.last_command_receive_ns = now
+
+保存最近 command。
+
+process_formation_command：
+
+1. 如果沒有 command，return。
+2. 如果 command timeout，fault landing。
+3. 如果 MISSION_COMPLETE，request_land。
+4. 如果 EMERGENCY_STOP，fault landing。
+5. 如果不是 centralized，return。
+6. 如果 MOVE，更新 reference。
+7. 如果 SET_YAW，更新 yaw。
+
+MOVE 寫法：
+
+    velocity = VectorENU(
+        east=float(command.velocity_east),
+        north=float(command.velocity_north),
+        up=float(command.velocity_up),
+    )
+
+把 message 內的數值包成 VectorENU。
+
+    self.controller.apply_velocity_command(
+        velocity_enu=velocity,
+        yaw_rate=float(command.yaw_rate),
+        dt_seconds=self.control_period,
+    )
+
+更新 formation reference。
+
+============================================================
+11. safety_manager.py 寫法
+============================================================
+
+SafetyManager 分兩種檢查。
+
+------------------------------------------------------------
+11.1 check_states
+------------------------------------------------------------
+
+檢查目前 UAV 狀態。
+
+例如速度：
+
+    velocity = state.velocity_local_enu
+    if velocity is not None:
+        speed = sqrt(vx^2 + vy^2 + vz^2)
+        if speed > self.maximum_speed:
+            violations.append(...)
+
+violations 是 list。
+
+只要有任何違規，就 append 一個 SafetyViolation。
+
+最後：
+
+    return self._result(violations)
+
+如果 violations 是空的，safe=True。
+如果不是空的，safe=False。
+
+------------------------------------------------------------
+11.2 check_setpoints
+------------------------------------------------------------
+
+檢查要送出去的 setpoint。
+
+目前有分 position mode 和 velocity mode。
+
+判斷：
+
+    velocity = getattr(setpoint, 'velocity_local_enu', None)
+
+如果 velocity 不是 None，代表 velocity mode。
+
+velocity mode：
+
+    檢查 velocity 是否 finite。
+    檢查 velocity magnitude 是否超過 maximum_speed。
+    不檢查 position jump。
+
+為什麼不檢查 position jump：
+
+    因為 velocity mode 真正送給 PX4 的是 velocity。
+    position 欄位只是 fallback/reference。
+
+position mode：
+
+    檢查 target altitude。
+    檢查 geofence。
+    檢查 maximum_setpoint_jump。
+
+============================================================
+12. 幾個常見 Python 寫法翻譯
+============================================================
+
+------------------------------------------------------------
+12.1 dict comprehension
+------------------------------------------------------------
+
+    states = {
+        vehicle_id: vehicle.get_state()
+        for vehicle_id, vehicle in self.vehicles.items()
+    }
+
+等同於：
+
+    states = {}
+    for vehicle_id, vehicle in self.vehicles.items():
+        states[vehicle_id] = vehicle.get_state()
+
+------------------------------------------------------------
+12.2 set 比較
+------------------------------------------------------------
+
+    if set(setpoints) != set(states):
+
+dict 轉 set 時會取 key。
+
+所以這是在比較：
+
+    setpoints 裡有哪些 UAV id
+    states 裡有哪些 UAV id
+
+如果不一樣，代表有 UAV 沒有 setpoint。
+
+------------------------------------------------------------
+12.3 getattr
+------------------------------------------------------------
+
+    velocity = getattr(setpoint, 'velocity_local_enu', None)
+
+意思是：
+
+    如果 setpoint 有 velocity_local_enu 欄位，就取出來。
+    如果沒有，就回傳 None。
+
+這樣寫比較保守，避免舊物件沒有欄位時 crash。
+
+------------------------------------------------------------
+12.4 continue
+------------------------------------------------------------
+
+在 for loop 裡：
+
+    if condition:
+        continue
+
+意思是跳過這一輪，直接進下一個 item。
+
+例如 CPF 裡：
+
+    if other_id == vehicle_id:
+        continue
+
+就是不要拿自己跟自己算避障。
+
+------------------------------------------------------------
+12.5 return output
+------------------------------------------------------------
+
+MissionManager.update 裡很多地方會：
+
+    return output
+
+這代表這個 state 的處理到這裡結束。
+
+例如 WAITING_READY 還沒 ready：
+
+    return output
+
+output 是空的，所以 main_node 不會 publish setpoint / arm / land。
+
+============================================================
+13. 看程式時建議順序
+============================================================
+
+如果要讀懂目前程式，我建議照這個順序看：
+
+1. coordinate_convert.py
+   先懂 VectorENU / VectorNED。
+
+2. vehicle_interface.py
+   先懂 VehicleState / VehicleSetpoint / publish_setpoint。
+
+3. mission_manager.py
+   先懂狀態機怎麼從 IDLE 到 FORMATION。
+
+4. formation_shapes.py
+   看 line / triangle offset 怎麼產生。
+
+5. formation_controller.py
+   看 target_world / target_local 怎麼算。
+
+6. cpf_avoidance.py
+   看 attraction / repulsion / velocity 怎麼合成。
+
+7. safety_manager.py
+   看哪些條件會 emergency landing。
+
+8. main_node.py
+   最後看 control_loop 把全部串起來。
+
+============================================================
+14. 一句話理解每個檔案
+============================================================
+
+coordinate_convert.py：
+
+    負責 ENU/NED 座標和 yaw 轉換。
+
+vehicle_interface.py：
+
+    負責跟 PX4 ROS 2 topic 溝通。
+
+mission_manager.py：
+
+    負責任務狀態機，不直接 publish topic。
+
+formation_shapes.py：
+
+    負責產生隊形 offset。
+
+formation_controller.py：
+
+    負責把隊形 offset 轉成每台 UAV 的 setpoint。
+
+cpf_avoidance.py：
+
+    負責把 position target 修正成避碰 velocity command。
+
+safety_manager.py：
+
+    負責檢查危險條件。
+
+main_node.py：
+
+    負責把 ROS 2 service/topic/timer 和所有 manager/controller 串起來。

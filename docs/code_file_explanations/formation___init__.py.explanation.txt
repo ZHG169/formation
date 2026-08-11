@@ -1,0 +1,16 @@
+對應檔案：formation/__init__.py
+
+這份檔案的角色：
+這個檔案讓 `formation/` 目錄成為 Python package。也就是說，其他檔案才能使用：
+`from formation.vehicle_interface import VehicleInterface`
+`from formation.coordinate_convert import VectorENU`
+
+主要寫法：
+通常這個檔案可以是空的。它不負責控制邏輯，也不會直接執行。
+
+重要細節：
+- 如果沒有這個檔案，Python 可能無法把 formation 當成 package import。
+- 不建議在這裡放太多初始化邏輯，避免 import formation 時產生副作用。
+
+常見調整方向：
+通常不用改。
