@@ -2,17 +2,35 @@
 
 ROS 2 Humble package for PX4/Gazebo multi-UAV formation control.
 
-This package is designed for three PX4 SITL UAVs with Micro XRCE-DDS communication. It supports synchronized takeoff and landing, centralized formation control, distributed formation control, leader command relay, ENU/NED coordinate conversion, and CPF velocity-based collision avoidance.
+This package is designed for three PX4 UAVs named `MAV1`, `MAV2`, and `MAV3`. It currently supports synchronized takeoff/landing, leader-follower formation control, leader command relay, ENU/NED coordinate conversion, CPF velocity-based collision avoidance, and mission-level safety checks.
+
+The current main workflow is:
+
+```text
+mission_node
+    synchronized takeoff / landing / mission state / safety
+
+leader_command_node
+    receives /formation/leader_input and publishes /formation/command
+
+leader_control_node
+    controls only the leader during FORMATION
+
+follower_formation_node
+    controls follower UAVs relative to the latest leader position
+```
 
 ## Main features
 
 - Three-UAV synchronized takeoff and landing
 - PX4 Offboard control through `px4_msgs`
-- Centralized formation control mode
-- Distributed per-vehicle formation control mode
-- Leader command topic: `/formation/command`
+- Leader-follower formation mode
+- Centralized and distributed control code kept for development/extension
+- Leader movement command through `/formation/leader_input`
 - Leader selection service
-- Formation shape / spacing service
+- Formation shape and spacing update through leader command/status
+- Slot assignment relative to the latest leader position
+- Formation complete detection with position tolerance, speed tolerance, and hold duration
 - ROS ENU to PX4 NED coordinate conversion
 - Control Potential Field, CPF, velocity-based UAV avoidance
 - Safety checks for distance, speed, altitude, geofence, timeout, and setpoint validity
@@ -36,6 +54,11 @@ formation/
 ├── CMakeLists.txt
 ├── package.xml
 ├── config/
+│   ├── mission.yaml
+│   ├── leader_command.yaml
+│   ├── leader_control.yaml
+│   ├── follower_formation.yaml
+│   ├── distributed.yaml
 │   └── formation.yaml
 ├── docs/
 │   └── code_file_explanations/
@@ -43,13 +66,15 @@ formation/
 │   ├── main_node.py
 │   ├── mission_manager.py
 │   ├── vehicle_interface.py
+│   ├── leader_command_node.py
+│   ├── leader_control_node.py
+│   ├── follower_formation_node.py
+│   ├── distributed_vehicle_node.py
 │   ├── formation_controller.py
 │   ├── formation_shapes.py
 │   ├── cpf_avoidance.py
 │   ├── safety_manager.py
 │   ├── leader_manager.py
-│   ├── leader_command_node.py
-│   ├── distributed_vehicle_node.py
 │   └── coordinate_convert.py
 ├── launch/
 │   ├── formation.launch.py
@@ -59,8 +84,11 @@ formation/
 │   ├── FormationError.msg
 │   └── FormationStatus.msg
 ├── scripts/
-│   ├── formation_node
+│   ├── mission_node
 │   ├── leader_command_node
+│   ├── leader_control_node
+│   ├── follower_formation_node
+│   ├── formation_node
 │   ├── distributed_vehicle_node
 │   └── monitor_mav_dds.sh
 └── srv/
@@ -90,7 +118,6 @@ Clone this package into a ROS 2 workspace:
 ```bash
 mkdir -p ~/uav_ws/src
 cd ~/uav_ws/src
-
 git clone https://github.com/ZHG169/formation.git
 ```
 
@@ -125,31 +152,71 @@ The expected PX4 DDS namespaces are:
 /MAV3/fmu/...
 ```
 
-The package assumes ROS/Gazebo side high-level logic uses ENU coordinates. PX4 Offboard setpoints are converted to NED before publishing.
+The package assumes ROS/Gazebo high-level logic uses ENU coordinates:
 
-## Run formation control
+```text
+x = east
+y = north
+z = up
+```
 
-Centralized mode, default:
+PX4 Offboard setpoints are converted to NED before publishing.
+
+## Run formation package
+
+PX4/Gazebo startup is kept separate. After the three UAVs and Micro XRCE-DDS Agent are ready, launch the formation package:
 
 ```bash
 ros2 launch formation formation.launch.py
 ```
 
-or explicitly:
+By default, the launch file uses `leader_follower` mode and starts:
+
+```text
+mission_node
+leader_command_node
+leader_control_node
+follower_formation_node
+```
+
+You can also pass the mode explicitly:
+
+```bash
+ros2 launch formation formation.launch.py control_mode:=leader_follower
+```
+
+Centralized and distributed modes are still available for development:
 
 ```bash
 ros2 launch formation formation.launch.py control_mode:=centralized
-```
-
-Distributed mode:
-
-```bash
 ros2 launch formation formation.launch.py control_mode:=distributed
 ```
 
-In centralized mode, `formation_node` computes setpoints for all UAVs.
+## Mission flow
 
-In distributed mode, `formation_node` manages mission state, while `distributed_vehicle_1`, `distributed_vehicle_2`, and `distributed_vehicle_3` compute per-vehicle setpoints during the FORMATION stage.
+The normal leader-follower flow is:
+
+```text
+IDLE
+  -> WAITING_READY
+  -> OFFBOARD_WARMUP
+  -> TAKEOFF
+  -> WAITING_LEADER_COMMAND
+  -> FORMATION
+  -> LANDING / EMERGENCY_LANDING
+```
+
+During `TAKEOFF`, `mission_node` controls all UAVs to the target takeoff height.
+
+After all UAVs reach the takeoff height, the mission waits in `WAITING_LEADER_COMMAND`. Formation motion does not start until a leader movement command is received.
+
+During `FORMATION`:
+
+- `mission_node` stops publishing formation-stage setpoints.
+- `leader_control_node` controls the leader.
+- `follower_formation_node` controls the follower UAVs.
+
+This avoids multiple nodes sending competing Offboard setpoints to the same PX4 instance.
 
 ## Takeoff and landing
 
@@ -165,35 +232,14 @@ Land all UAVs:
 ros2 service call /formation/land std_srvs/srv/Trigger "{}"
 ```
 
-After landing or emergency landing, the system may wait for ground confirmation depending on mission state.
+After emergency landing, the system may wait for ground confirmation depending on mission state.
 
-## Leader and formation services
+## Leader command
 
-Set leader:
-
-```bash
-ros2 service call /formation/set_leader formation/srv/SetLeader "{leader_id: 1}"
-```
-
-Set formation shape and spacing:
-
-```bash
-ros2 service call /formation/set_formation formation/srv/SetFormation "{formation_type: 'triangle', spacing: 2.0, control_mode: 'centralized'}"
-```
-
-Supported formation shapes are defined in `formation/formation_shapes.py`, currently including:
-
-- `triangle`
-- `line`
-- `v_shape`
-- `column`
-
-## Leader command topic
-
-The high-level command topic is:
+External user input should be sent to:
 
 ```text
-/formation/command
+/formation/leader_input
 ```
 
 Message type:
@@ -202,9 +248,22 @@ Message type:
 formation/msg/FormationCommand
 ```
 
-The command is intended to represent high-level formation intent, such as hold, move, yaw update, mission complete, or emergency stop. It is not a PX4 `VehicleCommand`, and it is not a pre-written waypoint path.
+Example: move the leader toward east and south for 10 seconds while using column formation with 1.2 m spacing:
 
-Main command values:
+```bash
+ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand "{
+  command: 1,
+  velocity_east: 0.2,
+  velocity_north: -0.2,
+  velocity_up: 0.0,
+  yaw_rate: 0.0,
+  duration: 10.0,
+  formation_type: 'column',
+  spacing: 1.2
+}"
+```
+
+Command values:
 
 ```text
 HOLD = 0
@@ -214,28 +273,137 @@ MISSION_COMPLETE = 3
 EMERGENCY_STOP = 4
 ```
 
-The leader command relay node publishes `/formation/command` and listens to `/formation/leader_input`.
-
-## Configuration
-
-Main parameters are in:
+`leader_command_node` receives `/formation/leader_input`, attaches the current leader id / leader generation, then republishes the active command to:
 
 ```text
-config/formation.yaml
+/formation/command
 ```
 
-Important parameters:
+The command is a high-level control intent. It is not a PX4 `VehicleCommand`, and it is not a pre-written waypoint path such as "fly forward 100 m then left 100 m".
+
+## Leader and slot behavior
+
+The leader can be changed with:
+
+```bash
+ros2 service call /formation/set_leader formation/srv/SetLeader "{leader_id: 1}"
+```
+
+In leader-follower mode, follower slot targets are calculated relative to the latest leader position.
+
+The slot log shows relative offsets, not absolute world positions. Example:
+
+```text
+Slot assignment locked relative to latest leader position:
+MAV1=(0.00, 0.00, 0.00), MAV2=(0.00, -1.20, 0.00), MAV3=(0.00, 1.20, 0.00)
+```
+
+This means:
+
+```text
+MAV1 is the leader/center slot
+MAV2 is 1.2 m on one side
+MAV3 is 1.2 m on the other side
+```
+
+When the leader moves, the anchor is updated from the leader's latest position, so the follower targets move with the leader.
+
+## Formation shapes
+
+Supported shape names:
+
+- `line`
+- `column`
+- `triangle`
+- `v_shape`
+
+Current convention:
+
+```text
+line:
+    lateral left/right formation, north-axis offsets when yaw = 0
+
+column:
+    forward/back formation, east-axis offsets when yaw = 0
+
+triangle / v_shape:
+    leader/front slot with two rear follower slots
+```
+
+Shape and spacing can be changed through `/formation/leader_input` by setting:
 
 ```yaml
-control_frequency: 100.0
-control_mode: centralized
+formation_type: 'column'
+spacing: 1.2
+```
+
+The follower node resets slot assignment when the leader, shape, or spacing changes.
+
+## Formation complete
+
+`follower_formation_node` publishes formation readiness through:
+
+```text
+/formation/follower_status
+```
+
+`mission_node` republishes the final mission status through:
+
+```text
+/formation/status
+```
+
+Formation is considered complete only when:
+
+```text
+maximum follower position error <= formation_position_tolerance
+maximum follower speed <= formation_speed_tolerance
+both conditions are held for formation_hold_duration seconds
+```
+
+These parameters are internal follower-node parameters and are not added to the msg definition.
+
+Example:
+
+```yaml
+formation_position_tolerance: 0.5
+formation_speed_tolerance: 0.15
+formation_hold_duration: 2.0
+```
+
+## Configuration files
+
+The main configuration is split into smaller files:
+
+```text
+config/mission.yaml
+config/leader_command.yaml
+config/leader_control.yaml
+config/follower_formation.yaml
+config/distributed.yaml
+```
+
+`config/formation.yaml` is kept as a package-level reference/index file.
+
+Important mission parameters:
+
+```yaml
+control_frequency: 50.0
+control_mode: leader_follower
 leader_id: 1
-formation_type: triangle
-formation_spacing: 2.0
+formation_type: column
+formation_spacing: 1.2
 takeoff_height: 3.0
-formation_reference_enu: [4.0, 0.0, 3.0]
-formation_reference_yaw_enu: 0.0
 command_timeout: 1.0
+```
+
+Important follower formation parameters:
+
+```yaml
+formation_position_tolerance: 0.5
+formation_speed_tolerance: 0.15
+formation_hold_duration: 2.0
+slot_assignment_lock: true
 ```
 
 CPF avoidance parameters:
@@ -244,7 +412,7 @@ CPF avoidance parameters:
 cpf_enabled: true
 cpf_attraction_gain: 0.5
 cpf_repulsion_gain: 1.2
-cpf_safe_distance: 1.5
+cpf_safe_distance: 0.8
 cpf_influence_distance: 3.0
 cpf_max_speed: 0.6
 cpf_output_velocity: true
@@ -299,6 +467,36 @@ Expected output topics include:
 
 The exact `_v1` suffix depends on the `px4_msgs` / PX4 version.
 
+## Real-world OptiTrack direction
+
+For real-world testing, the recommended architecture is:
+
+```text
+OptiTrack / Motive
+    -> ROS 2 pose topic
+    -> PX4 external vision / EKF2
+    -> /MAVx/fmu/out/vehicle_local_position_v1
+    -> formation package
+```
+
+The formation controller should ideally continue using PX4 local position output. This keeps Gazebo and real-world operation consistent:
+
+```text
+Gazebo:
+    simulated sensors / PX4 estimator -> PX4 local position -> formation
+
+Real world:
+    OptiTrack / external vision -> PX4 local position -> formation
+```
+
+A future position-provider or mocap bridge can publish unified pose topics such as:
+
+```text
+/mocap/MAV1/pose
+/mocap/MAV2/pose
+/mocap/MAV3/pose
+```
+
 ## Documentation
 
 Code explanations are available in:
@@ -318,9 +516,10 @@ These notes explain each source file, configuration file, launch file, msg, and 
 ## Notes
 
 - Do not run multiple Offboard controllers for the same PX4 instance at the same time.
-- In distributed mode, the ground formation node skips formation-stage heartbeat/setpoint publishing so the per-vehicle distributed nodes can control their own UAVs.
+- In leader-follower mode, `mission_node` owns takeoff/landing, while `leader_control_node` and `follower_formation_node` own formation-stage movement.
 - If Gazebo reports the vehicle is flying but the model does not move, check PX4 `gz_bridge`, Gazebo physics state, and motor command topics.
 - If `/formation/takeoff` succeeds but the mission stays in `WAITING_READY`, check PX4 preflight, local position, DDS topics, and Micro XRCE-DDS Agent connection.
+- If `/formation/leader_input` does not move the leader, check whether `/formation/status` has reached `WAITING_LEADER_COMMAND` or `FORMATION`, and verify `/formation/command` is being published.
 
 ## License
 
