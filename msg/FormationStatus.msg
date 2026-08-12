@@ -4,6 +4,7 @@ uint8 leader_id
 string mission_state
 string control_mode
 string formation_type
+float32 spacing
 
 bool formation_ready
 float32 maximum_position_error

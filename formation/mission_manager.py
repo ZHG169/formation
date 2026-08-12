@@ -11,6 +11,7 @@ class MissionState(Enum):
     WAITING_READY = auto()
     OFFBOARD_WARMUP = auto()
     TAKEOFF = auto()
+    WAITING_LEADER_COMMAND = auto()
     FORMATION = auto()
     LANDING = auto()
     LANDED = auto()
@@ -78,6 +79,7 @@ class MissionManager:
     def request_land(self):
         if self.state not in {
             MissionState.TAKEOFF,
+            MissionState.WAITING_LEADER_COMMAND,
             MissionState.FORMATION,
         }:
             return False
@@ -90,6 +92,7 @@ class MissionManager:
     def request_fault_landing(self, reason):
         if self.state not in {
             MissionState.TAKEOFF,
+            MissionState.WAITING_LEADER_COMMAND,
             MissionState.FORMATION,
         }:
             return False
@@ -115,11 +118,19 @@ class MissionManager:
         return self.state in {
             MissionState.OFFBOARD_WARMUP,
             MissionState.TAKEOFF,
+            MissionState.WAITING_LEADER_COMMAND,
             MissionState.FORMATION,
         }
 
     def set_error(self):
         self.state = MissionState.ERROR
+
+    def request_start_formation(self):
+        if self.state != MissionState.WAITING_LEADER_COMMAND:
+            return False
+
+        self.state = MissionState.FORMATION
+        return True
 
     def _state_is_ready(self, state, now_ns):
         if not (
@@ -240,16 +251,21 @@ class MissionManager:
             output.setpoints = dict(self.takeoff_setpoints)
 
             if self._all_at_takeoff_height(states):
-                self.state = MissionState.FORMATION
+                self.state = MissionState.WAITING_LEADER_COMMAND
 
             return output
 
-        if self.state == MissionState.FORMATION:
+        if self.state == MissionState.WAITING_LEADER_COMMAND:
             output.publish_offboard = True
-            output.setpoints = controller.calculate(
-                states=states,
-                leader_id=leader_manager.leader_id,
-            )
+            output.setpoints = dict(self.takeoff_setpoints)
+            return output
+
+        if self.state == MissionState.FORMATION:
+            # FORMATION setpoints are owned by dedicated control nodes.
+            # mission_node remains the state owner and keeps landing /
+            # emergency authority, but it does not publish formation
+            # heartbeat or setpoints in this state.
+            del controller, leader_manager
             return output
 
         if self.state in {

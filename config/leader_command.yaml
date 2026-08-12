@@ -1,0 +1,3 @@
+leader_command_node:
+  ros__parameters:
+    publish_frequency: 10.0

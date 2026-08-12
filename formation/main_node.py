@@ -17,13 +17,52 @@ from formation.mission_manager import MissionManager, MissionState
 from formation.safety_manager import SafetyManager
 from formation.vehicle_interface import VehicleInterface
 
-# 任務主控端
-class FormationNode(Node):
+"""
+Mission-layer node for the formation package.
+
+Current responsibility:
+    mission_node
+        Owns mission state, synchronized takeoff, synchronized landing,
+        emergency landing, leader selection, safety checks and status.
+
+Next split names:
+    leader_control_node
+        Future node that owns only the leader setpoint during FORMATION.
+
+    follower_formation_node
+        Future node that owns only follower setpoints during FORMATION.
+
+    safety_monitor_node
+        Future optional node that monitors all UAVs and can request
+        emergency landing.
+
+Naming rule:
+    "leader" means command/anchor source.
+    "slot" means formation position such as left, center or right.
+    A leader does not have to be the center slot.
+"""
+
+
+MISSION_NODE_NAME = 'mission_node'
+
+CONTROL_MODE_CENTRALIZED = 'centralized'
+CONTROL_MODE_DISTRIBUTED = 'distributed'
+CONTROL_MODE_LEADER_FOLLOWER = 'leader_follower'
+
+
+class MissionNode(Node):
+    """Mission manager node.
+
+    The executable is still named ``formation_node`` for compatibility,
+    but this class is intentionally named MissionNode because this file
+    is becoming the mission layer before leader/follower control is
+    split into separate nodes.
+    """
 
     def __init__(self):
-        super().__init__('formation_node')
-        
-        ＃ 讀取yaml參數
+        super().__init__(MISSION_NODE_NAME)
+
+        # 讀取yaml參數
         self.declare_parameters(
             namespace='',
             parameters=[
@@ -166,6 +205,9 @@ class FormationNode(Node):
         self.formation_type = str(
             self.get_parameter('formation_type').value
         )
+        self.formation_spacing = float(
+            self.get_parameter('formation_spacing').value
+        )
         frequency = float(
             self.get_parameter('control_frequency').value
         )
@@ -201,7 +243,7 @@ class FormationNode(Node):
             ),
         )
 
-        if mode == 'centralized':
+        if mode == CONTROL_MODE_CENTRALIZED:
             reference_values = list(
                 self.get_parameter(
                     'formation_reference_enu'
@@ -228,15 +270,18 @@ class FormationNode(Node):
 
             self.controller = CentralizedFormationController(
                 formation_type=self.formation_type,
-                spacing=self.get_parameter(
-                    'formation_spacing'
-                ).value,
+                spacing=self.formation_spacing,
                 vehicle_origins=self.vehicle_origins,
                 formation_reference=formation_reference,
                 control_period=self.control_period,
                 cpf_config=self.cpf_config,
             )
-        elif mode == 'distributed':
+        elif mode in {
+            CONTROL_MODE_DISTRIBUTED,
+            CONTROL_MODE_LEADER_FOLLOWER,
+        }:
+            # In distributed / leader_follower modes, FORMATION
+            # setpoints are produced by external control nodes.
             self.controller = DistributedFormationController()
         else:
             raise ValueError(f'Unknown control mode: {mode}')
@@ -284,6 +329,19 @@ class FormationNode(Node):
             10,
         )
 
+        self.follower_formation_ready = False
+        self.follower_maximum_position_error = 0.0
+        self.formation_complete_reported = False
+
+        self.follower_status_subscription = (
+            self.create_subscription(
+                FormationStatus,
+                '/formation/follower_status',
+                self.follower_status_callback,
+                10,
+            )
+        )
+
         # 發布狀態
         self.status_publisher = self.create_publisher(
             FormationStatus,
@@ -312,7 +370,10 @@ class FormationNode(Node):
 
         leader_check = None
 
-        if self.mission_manager.state == MissionState.FORMATION:
+        if self.mission_manager.state in {
+            MissionState.WAITING_LEADER_COMMAND,
+            MissionState.FORMATION,
+        }:
             self.process_formation_command(now_ns)
 
         if self.mission_manager.state == MissionState.FORMATION:
@@ -349,7 +410,10 @@ class FormationNode(Node):
                 )
 
         should_check_safety = (
-            self.mission_manager.state == MissionState.TAKEOFF
+            self.mission_manager.state in {
+                MissionState.TAKEOFF,
+                MissionState.WAITING_LEADER_COMMAND,
+            }
             or (
                 self.mission_manager.state
                 == MissionState.FORMATION
@@ -386,6 +450,7 @@ class FormationNode(Node):
         if (
             self.mission_manager.state in {
                 MissionState.TAKEOFF,
+                MissionState.WAITING_LEADER_COMMAND,
                 MissionState.FORMATION,
             }
             and output.setpoints
@@ -412,10 +477,20 @@ class FormationNode(Node):
                         leader_manager=self.leader_manager,
                     )
 
-        # 避免兩個node同時控制兩台PX4
+        # Mission-layer control ownership:
+        #
+        # OFFBOARD_WARMUP / TAKEOFF:
+        #     mission_node owns all UAV heartbeat and setpoints.
+        #
+        # FORMATION + distributed:
+        #     distributed_vehicle_node owns vehicle setpoints, so the
+        #     mission layer must not publish competing heartbeat.
+        #
+        # Future leader_follower mode:
+        #     leader_control_node will own leader setpoints and
+        #     follower_formation_node will own follower setpoints.
         skip_ground_heartbeat = (
-            self.control_mode == 'distributed'
-            and self.mission_manager.state == MissionState.FORMATION
+            self.external_formation_controller_active()
         )
 
         if output.publish_offboard and not skip_ground_heartbeat:
@@ -451,6 +526,32 @@ class FormationNode(Node):
             )
             self.last_mission_state = self.mission_manager.state
 
+    def follower_status_callback(self, message):
+        if int(message.leader_id) != self.leader_manager.leader_id:
+            return
+        if (
+            int(message.leader_generation)
+            != self.leader_manager.leader_generation
+        ):
+            return
+
+        self.follower_formation_ready = bool(
+            message.formation_ready
+        )
+        self.follower_maximum_position_error = float(
+            message.maximum_position_error
+        )
+
+        if (
+            self.follower_formation_ready
+            and not self.formation_complete_reported
+            and self.mission_manager.state == MissionState.FORMATION
+        ):
+            self.get_logger().info(
+                'FORMATION COMPLETE: landing command may be sent'
+            )
+            self.formation_complete_reported = True
+
     def command_callback(self, message):
         if int(message.leader_id) != self.leader_manager.leader_id:
             return
@@ -466,6 +567,38 @@ class FormationNode(Node):
             self.get_clock().now().nanoseconds
         )
         self.command_timeout_reported = False
+
+    def apply_command_formation_settings(self, command):
+        formation_type = str(command.formation_type).strip()
+        formation_changed = False
+
+        if formation_type:
+            if formation_type != self.formation_type:
+                self.formation_type = formation_type
+                formation_changed = True
+
+        if command.spacing > 0.0:
+            new_spacing = float(command.spacing)
+            if abs(new_spacing - self.formation_spacing) > 1e-6:
+                self.formation_spacing = new_spacing
+                formation_changed = True
+
+        if (
+            formation_changed
+            and self.control_mode == CONTROL_MODE_CENTRALIZED
+            and hasattr(self.controller, 'set_formation')
+        ):
+            self.controller.set_formation(
+                self.formation_type,
+                self.formation_spacing,
+            )
+
+        if formation_changed:
+            self.get_logger().info(
+                'Formation command updated shape to '
+                f'{self.formation_type}, spacing '
+                f'{self.formation_spacing:.2f} m'
+            )
 
     def process_formation_command(self, now_ns):
         if self.latest_command is None:
@@ -487,11 +620,28 @@ class FormationNode(Node):
             return
 
         command = self.latest_command
+        self.apply_command_formation_settings(command)
 
         if command.command == FormationCommand.MISSION_COMPLETE:
             if self.mission_manager.request_land():
                 self.get_logger().info(
                     'Mission complete command received; landing all UAVs'
+                )
+            return
+
+        if (
+            self.mission_manager.state
+            == MissionState.WAITING_LEADER_COMMAND
+        ):
+            if command.command != FormationCommand.MOVE:
+                return
+
+            if self.mission_manager.request_start_formation():
+                self.follower_formation_ready = False
+                self.follower_maximum_position_error = 0.0
+                self.formation_complete_reported = False
+                self.get_logger().info(
+                    'Leader MOVE command received; starting FORMATION'
                 )
             return
 
@@ -521,6 +671,17 @@ class FormationNode(Node):
             self.controller.set_reference_yaw(
                 float(command.yaw_enu)
             )
+
+    def external_formation_controller_active(self):
+        """Return True when another node owns FORMATION setpoints."""
+
+        return (
+            self.control_mode in {
+                CONTROL_MODE_DISTRIBUTED,
+                CONTROL_MODE_LEADER_FOLLOWER,
+            }
+            and self.mission_manager.state == MissionState.FORMATION
+        )
 
     def takeoff_callback(self, request, response):
         del request
@@ -575,19 +736,30 @@ class FormationNode(Node):
         )
         message.control_mode = self.control_mode
         message.formation_type = self.formation_type
-        maximum_position_error = float(
-            getattr(
-                self.controller,
-                'maximum_position_error',
-                0.0,
+        message.spacing = float(self.formation_spacing)
+        if self.control_mode == CONTROL_MODE_LEADER_FOLLOWER:
+            maximum_position_error = (
+                self.follower_maximum_position_error
             )
-        )
-        message.formation_ready = (
-            self.mission_manager.state
-            == MissionState.FORMATION
-            and maximum_position_error
-            <= self.formation_position_tolerance
-        )
+            message.formation_ready = (
+                self.mission_manager.state
+                == MissionState.FORMATION
+                and self.follower_formation_ready
+            )
+        else:
+            maximum_position_error = float(
+                getattr(
+                    self.controller,
+                    'maximum_position_error',
+                    0.0,
+                )
+            )
+            message.formation_ready = (
+                self.mission_manager.state
+                == MissionState.FORMATION
+                and maximum_position_error
+                <= self.formation_position_tolerance
+            )
         message.maximum_position_error = (
             maximum_position_error
         )
@@ -756,9 +928,12 @@ class FormationNode(Node):
         self.get_logger().error(result.message)
 
 
+FormationNode = MissionNode
+
+
 def main(args=None):
     rclpy.init(args=args)
-    node = FormationNode()
+    node = MissionNode()
 
     try:
         rclpy.spin(node)

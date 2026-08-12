@@ -32,7 +32,10 @@ install(
 install(
   PROGRAMS
     scripts/formation_node
+    scripts/mission_node
     scripts/leader_command_node
+    scripts/leader_control_node
+    scripts/follower_formation_node
     scripts/distributed_vehicle_node
     scripts/monitor_mav_dds.sh
   DESTINATION lib/${PROJECT_NAME}

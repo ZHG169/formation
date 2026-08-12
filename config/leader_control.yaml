@@ -1,0 +1,15 @@
+leader_control_node:
+  ros__parameters:
+    control_frequency: 50.0
+    leader_id: 1
+    command_timeout: 1.0
+
+    vehicle_names:
+      - MAV1
+      - MAV2
+      - MAV3
+
+    vehicle_system_ids:
+      - 1
+      - 2
+      - 3

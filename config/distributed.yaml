@@ -1,0 +1,80 @@
+distributed_vehicle_1:
+  ros__parameters:
+    control_frequency: 100.0
+    vehicle_id: 1
+    namespace: MAV1
+    vehicle_origin_enu: [0.0, 0.0, 0.0]
+    vehicle_ids: [1, 2, 3]
+    vehicle_names: [MAV1, MAV2, MAV3]
+    vehicle_origins_enu: [
+      0.0, 0.0, 0.0,
+      2.0, 0.0, 0.0,
+      0.0, 2.0, 0.0
+    ]
+    formation_type: line
+    formation_spacing: 4.0
+    formation_reference_enu: [4.0, 0.0, 3.0]
+    formation_reference_yaw_enu: 0.0
+    command_timeout: 1.0
+    local_position_timeout: 2.0
+    cpf_enabled: true
+    cpf_attraction_gain: 0.8
+    cpf_repulsion_gain: 1.2
+    cpf_safe_distance: 0.4
+    cpf_influence_distance: 3.0
+    cpf_max_speed: 0.8
+    cpf_output_velocity: true
+
+distributed_vehicle_2:
+  ros__parameters:
+    control_frequency: 100.0
+    vehicle_id: 2
+    namespace: MAV2
+    vehicle_origin_enu: [2.0, 0.0, 0.0]
+    vehicle_ids: [1, 2, 3]
+    vehicle_names: [MAV1, MAV2, MAV3]
+    vehicle_origins_enu: [
+      0.0, 0.0, 0.0,
+      2.0, 0.0, 0.0,
+      0.0, 2.0, 0.0
+    ]
+    formation_type: line
+    formation_spacing: 4.0
+    formation_reference_enu: [4.0, 0.0, 3.0]
+    formation_reference_yaw_enu: 0.0
+    command_timeout: 1.0
+    local_position_timeout: 2.0
+    cpf_enabled: true
+    cpf_attraction_gain: 0.8
+    cpf_repulsion_gain: 1.2
+    cpf_safe_distance: 0.4
+    cpf_influence_distance: 3.0
+    cpf_max_speed: 0.8
+    cpf_output_velocity: true
+
+distributed_vehicle_3:
+  ros__parameters:
+    control_frequency: 100.0
+    vehicle_id: 3
+    namespace: MAV3
+    vehicle_origin_enu: [0.0, 2.0, 0.0]
+    vehicle_ids: [1, 2, 3]
+    vehicle_names: [MAV1, MAV2, MAV3]
+    vehicle_origins_enu: [
+      0.0, 0.0, 0.0,
+      2.0, 0.0, 0.0,
+      0.0, 2.0, 0.0
+    ]
+    formation_type: line
+    formation_spacing: 4.0
+    formation_reference_enu: [4.0, 0.0, 3.0]
+    formation_reference_yaw_enu: 0.0
+    command_timeout: 1.0
+    local_position_timeout: 2.0
+    cpf_enabled: true
+    cpf_attraction_gain: 0.8
+    cpf_repulsion_gain: 1.2
+    cpf_safe_distance: 0.4
+    cpf_influence_distance: 3.0
+    cpf_max_speed: 0.8
+    cpf_output_velocity: true
