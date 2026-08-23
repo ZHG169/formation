@@ -1,0 +1,52 @@
+mission_node:
+  ros__parameters:
+    control_frequency: 50.0
+    control_mode: leader_follower
+
+    leader_id: 1
+
+    formation_type: column
+    formation_spacing: 1.2
+    takeoff_height: 0.5
+
+    # legacy reference mode parameters. leader_follower mode does not
+    # use formation_reference_enu as the formation anchor.
+    formation_reference_enu: [4.0, 0.0, 3.0]
+    formation_reference_yaw_enu: 0.0
+    command_timeout: 1.0
+
+    ready_hold_duration: 2.0
+    offboard_warmup_duration: 2.0
+    local_position_timeout: 2.0
+    takeoff_altitude_tolerance: 0.3
+
+    leader_position_timeout: 2.0
+    leader_failure_hold_duration: 1.0
+    land_command_interval: 1.0
+
+    # Real flight profile:
+    # PX4 local_position is expected to already be in the shared
+    # OptiTrack / external-vision coordinate frame, so no Gazebo spawn
+    # offset is added.
+    vehicle_origins_enu: [
+      0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0
+    ]
+
+    minimum_vehicle_distance: 0.8
+    maximum_altitude: 20.0
+    maximum_speed: 3.0
+    geofence_radius: 50.0
+    maximum_setpoint_jump: 6.0
+    formation_position_tolerance: 0.2
+
+    vehicle_names:
+      - MAV1
+      - MAV2
+      - MAV3
+
+    vehicle_system_ids:
+      - 1
+      - 2
+      - 3

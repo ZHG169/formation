@@ -71,7 +71,7 @@ class MissionNode(Node):
                 ('formation_type', 'triangle'),
                 ('formation_spacing', 2.0),
                 ('leader_id', 1),
-                ('takeoff_height', 3.0),
+                ('takeoff_height', 0.5),
                 ('ready_hold_duration', 2.0),
                 ('offboard_warmup_duration', 2.0),
                 ('local_position_timeout', 2.0),

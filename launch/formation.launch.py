@@ -11,28 +11,39 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     package_share = get_package_share_directory('formation')
-    mission_config = os.path.join(
+
+    default_mission_config = os.path.join(
         package_share,
         'config',
         'mission.yaml',
     )
-    leader_command_config = os.path.join(
+    default_leader_command_config = os.path.join(
         package_share,
         'config',
         'leader_command.yaml',
     )
-    leader_control_config = os.path.join(
+    default_leader_control_config = os.path.join(
         package_share,
         'config',
         'leader_control.yaml',
     )
-    follower_formation_config = os.path.join(
+    default_follower_formation_config = os.path.join(
         package_share,
         'config',
         'follower_formation.yaml',
     )
 
     control_mode = LaunchConfiguration('control_mode')
+    mission_config = LaunchConfiguration('mission_config')
+    leader_command_config = LaunchConfiguration(
+        'leader_command_config'
+    )
+    leader_control_config = LaunchConfiguration(
+        'leader_control_config'
+    )
+    follower_formation_config = LaunchConfiguration(
+        'follower_formation_config'
+    )
 
     mission_node = Node(
         package='formation',
@@ -80,6 +91,28 @@ def generate_launch_description():
             description=(
                 'leader_follower is the normal split-node mode. '
                 'centralized/distributed are legacy modes.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'mission_config',
+            default_value=default_mission_config,
+            description='Mission node parameter YAML file.',
+        ),
+        DeclareLaunchArgument(
+            'leader_command_config',
+            default_value=default_leader_command_config,
+            description='Leader command node parameter YAML file.',
+        ),
+        DeclareLaunchArgument(
+            'leader_control_config',
+            default_value=default_leader_control_config,
+            description='Leader control node parameter YAML file.',
+        ),
+        DeclareLaunchArgument(
+            'follower_formation_config',
+            default_value=default_follower_formation_config,
+            description=(
+                'Follower formation node parameter YAML file.'
             ),
         ),
         mission_node,

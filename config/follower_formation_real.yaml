@@ -1,0 +1,42 @@
+follower_formation_node:
+  ros__parameters:
+    control_frequency: 50.0
+    leader_id: 1
+
+    formation_type: column
+    formation_spacing: 1.2
+    formation_reference_yaw_enu: 0.0
+    formation_position_tolerance: 0.5
+    formation_speed_tolerance: 0.15
+    formation_hold_duration: 2.0
+    local_position_timeout: 2.0
+    slot_assignment_lock: true
+
+    vehicle_names:
+      - MAV1
+      - MAV2
+      - MAV3
+
+    vehicle_system_ids:
+      - 1
+      - 2
+      - 3
+
+    # Real flight profile:
+    # PX4 local_position is expected to already be in the shared
+    # OptiTrack / external-vision coordinate frame, so no Gazebo spawn
+    # offset is added.
+    vehicle_origins_enu: [
+      0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0
+    ]
+
+    cpf_enabled: true
+    cpf_attraction_gain: 0.5
+    cpf_repulsion_gain: 1.2
+    cpf_safe_distance: 0.8
+    cpf_influence_distance: 3.0
+    cpf_max_speed: 0.6
+    cpf_output_velocity: true
+

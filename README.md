@@ -192,6 +192,33 @@ ros2 launch formation formation.launch.py control_mode:=centralized
 ros2 launch formation formation.launch.py control_mode:=distributed
 ```
 
+### Real-flight launch profile
+
+For real-world testing with OptiTrack / external vision, use:
+
+```bash
+ros2 launch formation formation_real.launch.py
+```
+
+This launch file reuses the same node graph as `formation.launch.py`, but loads real-flight parameter files:
+
+```text
+config/mission_real.yaml
+config/follower_formation_real.yaml
+```
+
+The real profile assumes PX4 `vehicle_local_position_v1` is already in a shared external-vision / OptiTrack coordinate frame. Therefore `vehicle_origins_enu` is set to zero offsets:
+
+```yaml
+vehicle_origins_enu: [
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0
+]
+```
+
+The Gazebo profile keeps the original spawn offsets in `mission.yaml` and `follower_formation.yaml`.
+
 ## Mission flow
 
 The normal leader-follower flow is:
@@ -520,6 +547,28 @@ These notes explain each source file, configuration file, launch file, msg, and 
 - If Gazebo reports the vehicle is flying but the model does not move, check PX4 `gz_bridge`, Gazebo physics state, and motor command topics.
 - If `/formation/takeoff` succeeds but the mission stays in `WAITING_READY`, check PX4 preflight, local position, DDS topics, and Micro XRCE-DDS Agent connection.
 - If `/formation/leader_input` does not move the leader, check whether `/formation/status` has reached `WAITING_LEADER_COMMAND` or `FORMATION`, and verify `/formation/command` is being published.
+
+## Recent development summary
+
+Current updates:
+
+- `formation.launch.py` can now accept external parameter files through launch arguments.
+- Added `formation_real.launch.py` for real-world testing.
+- Added `mission_real.yaml` for real-flight mission parameters.
+- Added `follower_formation_real.yaml` for real-flight follower formation parameters.
+- Real-flight YAML sets `vehicle_origins_enu` to zero, assuming PX4 local position is already in the shared OptiTrack / external-vision frame.
+- Gazebo simulation keeps the original YAML files and spawn-origin offsets.
+
+## TODO
+
+- Add `rc_leader_input_node`:
+  - Subscribe to `/MAV1/fmu/out/manual_control_setpoint` or configurable leader RC topic.
+  - Convert RC pitch / roll / yaw input into `formation/msg/FormationCommand`.
+  - Publish commands to `/formation/leader_input`.
+  - Reuse the existing `leader_command_node -> leader_control_node -> follower_formation_node` pipeline.
+  - Keep RC teleoperation as an optional real-flight feature, not enabled by default in the Gazebo launch.
+- Add real-world OptiTrack bridge implementation after validating PX4 EKF2 external-vision parameters.
+- Later split `follower_formation_node` into per-vehicle `follower_vehicle_node` for true distributed onboard execution.
 
 ## License
 
