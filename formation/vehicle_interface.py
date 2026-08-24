@@ -27,40 +27,48 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 
-@dataclass
+@dataclass # 無人機實際狀態
 class VehicleState:
-    vehicle_id: int
-    namespace: str
+    vehicle_id: int #無人機編號
+    namespace: str #無人機名字
 
-    position_local_enu: Optional[VectorENU] = None
-    velocity_local_enu: Optional[VectorENU] = None
-    yaw_local_enu: float = 0.0
+    position_local_enu: Optional[VectorENU] = None 
+    # 無人機目前的 local ENU 位置
+    # 尚未收到 PX4 position 時為 None
+    # Optional[X]是來自 typing 模組的型別提示工具，代表該變數或參數可以是指定的型別 X，
+    # 或者也可以是 None。它其實就是 Union[X, None] 的簡寫。
+    velocity_local_enu: Optional[VectorENU] = None #無人機在ROS座標系的速度
+    yaw_local_enu: float = 0.0 #無人機在ROS座標系的偏航角
+    # 無人機在 local ENU 座標系下的 yaw
+    # 預設 0 rad，代表朝 ENU +X（East）方向
 
-    armed: bool = False
-    landed: bool = False
-    preflight_ok: bool = False
-    position_valid: bool = False
+    armed: bool = False #無人機是否解鎖
+    landed: bool = False #無人機是否降落
+    preflight_ok: bool = False #無人機是否準備起飛
+    position_valid: bool = False #無人機是否有有效的位子資訊
 
-    status_received: bool = False
-    position_received: bool = False
-    land_status_received: bool = False
+    status_received: bool = False #無人機狀態回覆
+    position_received: bool = False #無人機位子回覆
+    land_status_received: bool = False #無人機降落回覆
 
-    last_position_update_ns: int = 0
+    last_position_update_ns: int = 0 # 最後一次收到位置資料的時間戳，單位 ns
 
-    nav_state: int = 0
-    offboard_enabled: bool = False
+    nav_state: int = 0 #無人機導航狀態
+    offboard_enabled: bool = False # PX4 是否進入 Offboard 外部控制模式
 
 
-@dataclass
+@dataclass #無人機目標狀態
 class VehicleSetpoint:
     position_local_enu: VectorENU
     yaw_local_enu: float
     velocity_local_enu: Optional[VectorENU] = None
+    #有些控制命令需要指定「目標速度」，有些控制命令只需要指定「目標位置」，所以速度不是每次都必須提供。
 
 
 class VehicleInterface:
 
     def __init__(self, node, namespace, system_id):
+        # 外部傳入的 ROS2 Node，供 VehicleInterface 建立 pub/sub
         self.node = node
         self.namespace = namespace
         self.system_id = system_id
@@ -72,12 +80,18 @@ class VehicleInterface:
         input_prefix = f'/{namespace}/fmu/in'
         output_prefix = f'/{namespace}/fmu/out'
         qos = QoSProfile(
+            # 資料遺失可以接受，不要求每筆可靠送達
             reliability=ReliabilityPolicy.BEST_EFFORT,
+            # Publisher 可保留資料供較晚加入的 subscriber 使用
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+             # 只保存最近的資料
             history=HistoryPolicy.KEEP_LAST,
+            # 最近只留 1 筆
             depth=1,
         )
 
+        # 持續提供 Offboard 控制模式/控制類型的訊息(告訴PX4接下來要如何控制)
+        # OffboardControlMode 訊息的內容會決定 PX4 接下來要使用哪種控制模式。
         self.offboard_publisher = (
             self.node.create_publisher(
                 OffboardControlMode,
@@ -85,15 +99,24 @@ class VehicleInterface:
                 qos,
             )
         )
-
+        #建立 Publisher，用來發布位置、速度、yaw 等控制目標給 PX4(告訴PX4 控制項目)
         self.setpoint_publisher = (
             self.node.create_publisher(
+                # TrajectorySetpoint = 給 PX4 的「運動目標值」訊息。
+                # TrajectorySetpoint
+                # │
+                # ├── position      目標位置 [x, y, z]
+                # ├── velocity      目標速度 [vx, vy, vz]
+                # ├── acceleration  目標加速度 [ax, ay, az]
+                # ├── yaw           目標偏航角
+                # └── yawspeed      目標偏航角速度
                 TrajectorySetpoint,
                 f'{input_prefix}/trajectory_setpoint',
                 qos,
             )
         )
 
+        # 用來發布控制命令給 PX4(告訴PX4 要做什麼)
         self.command_publisher = (
             self.node.create_publisher(
                 VehicleCommand,
@@ -102,6 +125,7 @@ class VehicleInterface:
             )
         )
 
+        # 訂閱 PX4 的 VehicleStatus 訊息，取得無人機的狀態資訊
         self.status_subscription = (
             self.node.create_subscription(
                 VehicleStatus,
@@ -111,6 +135,7 @@ class VehicleInterface:
             )
         )
 
+        # 訂閱 PX4 的 VehicleLocalPosition 訊息，取得無人機的 local ENU 位置資訊
         self.position_subscription = (
             self.node.create_subscription(
                 VehicleLocalPosition,
@@ -120,6 +145,7 @@ class VehicleInterface:
             )
         )
 
+        # 訂閱 PX4 的 VehicleLandDetected 訊息，取得無人機的降落狀態資訊
         self.land_subscription = (
             self.node.create_subscription(
                 VehicleLandDetected,
@@ -129,13 +155,10 @@ class VehicleInterface:
             )
         )
 
-
-        # 在此建立 publishers 與 subscriptions。
-
     def status_callback(self, message):
         self.state.status_received = True
         self.state.preflight_ok = bool(
-            message.pre_flight_checks_pass
+            message.pre_flight_checks_pass 
         )
 
         self.state.armed = (
@@ -150,6 +173,7 @@ class VehicleInterface:
             == VehicleStatus.NAVIGATION_STATE_OFFBOARD
         )
 
+    # 檢查 position 是否是最新的，預設 timeout 2 秒，最後回傳 True / False。
     def position_is_fresh(
         self,
         timeout_seconds: float = 2.0,
@@ -164,13 +188,16 @@ class VehicleInterface:
         ) / 1e9
 
         return bool(
+            # 判斷位子有效且是最新更新的
             self.state.position_valid
             and 0.0 <= age_seconds <= timeout_seconds
         )
 
     def position_callback(self, message):
         self.state.position_received = True
-
+        # 判斷收到的位子是否是有限數據
+        # all() 是一個內建函數，用來檢查可迭代物件（如串列 []）中的所有元素是否都為真（True）。
+        #如果傳入空串列 all([])，它會回傳 True
         values_finite = all(
             math.isfinite(float(value))
             for value in (
@@ -184,6 +211,12 @@ class VehicleInterface:
             )
         )
 
+        # 判斷收到的位子是否有效，必須同時滿足以下條件：
+        # 1. xy_valid 為 True，表示 XY 平面位置有效
+        # 2. z_valid 為 True，表示 Z 軸位置有效
+        # 3. v_xy_valid 為 True，表示 XY 平面速度有效
+        # 4. v_z_valid 為 True，表示 Z 軸速度有效
+        # 5. values_finite 為 True，表示所有位置和速度數值都是有限的（不是 NaN 或無限大）
         self.state.position_valid = bool(
             message.xy_valid
             and message.z_valid
@@ -201,12 +234,14 @@ class VehicleInterface:
             self.state.velocity_local_enu = None
             return
 
+        # 整理PX4的位子資訊
         position_ned = VectorNED(
             north=float(message.x),
             east=float(message.y),
             down=float(message.z),
         )
 
+        # 將 NED 坐標轉換為 ENU 坐標，並更新 VehicleState 中的 position_local_enu
         self.state.position_local_enu = ned_to_enu(
             position_ned
         )
@@ -229,12 +264,15 @@ class VehicleInterface:
         return self.state
 
     def publish_offboard_heartbeat(self, use_velocity=False):
+        # use_velocity	position	velocity	控制方式
+        # False	        True	    False	    Position
+        # True	        False	    True	    Velocity
         message = OffboardControlMode()
 
         message.timestamp = self.timestamp_us()
         message.position = not bool(use_velocity)
         message.velocity = bool(use_velocity)
-        message.acceleration = False
+        message.acceleration = False # 並非給加速度 而是指現在不採用加速度控制
         message.attitude = False
         message.body_rate = False
         message.thrust_and_torque = False
@@ -247,6 +285,8 @@ class VehicleInterface:
         message.timestamp = self.timestamp_us()
         message.yaw = yaw_enu_to_ned(setpoint.yaw_local_enu)
 
+        # 決定是要用速度控制還是位子控制 因為CPF採用速度做控制 所以大部分會走速度端
+        # 因為一開始啟用位子做處理才會有現在的情況
         if setpoint.velocity_local_enu is not None:
             velocity_ned = enu_to_ned(setpoint.velocity_local_enu)
             message.position = [
@@ -267,6 +307,17 @@ class VehicleInterface:
         self.setpoint_publisher.publish(message)
     
     def set_offboard_mode(self):
+        # | `param2` | PX4 Custom Main Mode | 意義                  |
+        # | -------: | -------------------- | ------------------- |
+        # |        1 | `MANUAL`             | 手動控制                |
+        # |        2 | `ALTCTL`             | 高度控制                |
+        # |        3 | `POSCTL`             | 位置控制                |
+        # |        4 | `AUTO`               | 自動模式大類              |
+        # |        5 | `ACRO`               | Acro 特技/角速度類控制      |
+        # |        6 | `OFFBOARD`           | 外部控制                |
+        # |        7 | `STABILIZED`         | 穩定模式                |
+        # |        8 | `RATTITUDE`          | Rattitude（舊/特定版本相關） |
+
         self.send_command(
             VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
             param1=1.0,
@@ -285,11 +336,13 @@ class VehicleInterface:
             param1=0.0,
         )
 
+    # 降落偵測
     def land_detected_callback(self, message):
         self.state.land_status_received = True
         self.state.landed = bool(message.landed)
 
-    def land(self):
+    # 執行降落
+    def land(self): 
         self.send_command(
             VehicleCommand.VEHICLE_CMD_NAV_LAND
         )
@@ -303,13 +356,13 @@ class VehicleInterface:
         message.param2 = float(param2)
 
         message.target_system = self.system_id
-        message.target_component = 1
+        message.target_component = 1 # 指令要給主要飛控
 
-        message.source_system = 255
-        message.source_component = 1
+        message.source_system = 255 # 外部控制
+        message.source_component = 1 # 主要的外部控制來源
         message.from_external = True
 
         self.command_publisher.publish(message)
 
     def timestamp_us(self):
-        return self.node.get_clock().now().nanoseconds // 1000
+        return self.node.get_clock().now().nanoseconds // 1000 # 取得時間 單位為微秒

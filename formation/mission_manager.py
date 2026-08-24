@@ -154,13 +154,19 @@ class MissionManager:
             for state in states.values()
         )
 
-    # 無人機自己產生setpoint 並做轉換
+    # Capture each vehicle's current horizontal position as its
+    # takeoff point, then command only the target altitude.
+    #
+    # This keeps the UAVs from flying back to local (0, 0) during
+    # takeoff.  It also allows the same code path to work for both:
+    #   - Gazebo: local position + YAML spawn origin
+    #   - real flight: PX4 local_position from OptiTrack/external vision
     def _capture_takeoff_setpoints(self, states):
         self.takeoff_setpoints = {
             vehicle_id: VehicleSetpoint(
                 position_local_enu=VectorENU(
-                    east=0.0,
-                    north=0.0,
+                    east=state.position_local_enu.east,
+                    north=state.position_local_enu.north,
                     up=self.takeoff_height,
                 ),
                 yaw_local_enu=state.yaw_local_enu,
