@@ -44,6 +44,8 @@ class FollowerFormationNode(Node):
                 ('formation_speed_tolerance', 0.15),
                 ('formation_hold_duration', 2.0),
                 ('local_position_timeout', 2.0),
+                ('yaw_debug_enabled', False),
+                ('yaw_debug_interval', 1.0),
                 ('vehicle_names', ['MAV1', 'MAV2', 'MAV3']),
                 ('vehicle_system_ids', [1, 2, 3]),
                 ('vehicle_origins_enu', [

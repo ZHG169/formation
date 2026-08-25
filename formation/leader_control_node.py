@@ -28,6 +28,8 @@ class LeaderControlNode(Node):
                 ('control_frequency', 50.0),
                 ('leader_id', 1),
                 ('command_timeout', 1.0),
+                ('yaw_debug_enabled', False),
+                ('yaw_debug_interval', 1.0),
                 ('vehicle_names', ['MAV1', 'MAV2', 'MAV3']),
                 ('vehicle_system_ids', [1, 2, 3]),
             ],

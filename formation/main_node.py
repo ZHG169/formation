@@ -95,6 +95,10 @@ class MissionNode(Node):
                 ]),
                 ('formation_reference_yaw_enu', 0.0),
                 ('command_timeout', 1.0),
+                ('arm_retry_interval', 0.5),
+                ('arm_retry_timeout', 8.0),
+                ('yaw_debug_enabled', False),
+                ('yaw_debug_interval', 1.0),
                 ('cpf_enabled', False),
                 ('cpf_attraction_gain', 0.8),
                 ('cpf_repulsion_gain', 1.2),
@@ -293,6 +297,15 @@ class MissionNode(Node):
             self.get_parameter('command_timeout').value
         )
         self.command_timeout_reported = False
+        self.arm_retry_interval = float(
+            self.get_parameter('arm_retry_interval').value
+        )
+        self.arm_retry_timeout = float(
+            self.get_parameter('arm_retry_timeout').value
+        )
+        self.arm_retry_start_ns = 0
+        self.last_arm_retry_ns = 0
+        self.arm_retry_timeout_reported = False
 
         self.timer = self.create_timer(
             self.control_period,
@@ -508,11 +521,17 @@ class MissionNode(Node):
             self.vehicles[vehicle_id].publish_setpoint(setpoint)
 
         if output.set_offboard_and_arm:
+            self.arm_retry_start_ns = now_ns
+            self.last_arm_retry_ns = now_ns
+            self.arm_retry_timeout_reported = False
+
             for vehicle in self.vehicles.values():
                 vehicle.set_offboard_mode()
 
             for vehicle in self.vehicles.values():
                 vehicle.arm()
+
+        self.retry_offboard_and_arm_if_needed(now_ns)
 
         if output.land_all:
             for vehicle in self.vehicles.values():
@@ -525,6 +544,81 @@ class MissionNode(Node):
                 f'{self.mission_manager.state.name}'
             )
             self.last_mission_state = self.mission_manager.state
+
+
+    def retry_offboard_and_arm_if_needed(self, now_ns):
+        if self.mission_manager.state != MissionState.TAKEOFF:
+            self.arm_retry_start_ns = 0
+            self.last_arm_retry_ns = 0
+            self.arm_retry_timeout_reported = False
+            return
+
+        pending = {}
+        for vehicle_id, vehicle in self.vehicles.items():
+            state = vehicle.get_state()
+            if not state.armed or not state.offboard_enabled:
+                pending[vehicle_id] = state
+
+        if not pending:
+            self.arm_retry_start_ns = 0
+            self.last_arm_retry_ns = 0
+            self.arm_retry_timeout_reported = False
+            return
+
+        if self.arm_retry_start_ns == 0:
+            self.arm_retry_start_ns = now_ns
+
+        elapsed_seconds = (
+            now_ns - self.arm_retry_start_ns
+        ) / 1e9
+
+        if (
+            elapsed_seconds >= self.arm_retry_timeout
+            and not self.arm_retry_timeout_reported
+        ):
+            pending_text = ', '.join(
+                f'MAV{vehicle_id}:'
+                f'armed={state.armed},'
+                f'offboard={state.offboard_enabled}'
+                for vehicle_id, state in sorted(pending.items())
+            )
+            reason = (
+                'Offboard/arm timeout during takeoff: '
+                f'{pending_text}'
+            )
+            self.arm_retry_timeout_reported = True
+            if self.mission_manager.request_fault_landing(reason):
+                self.get_logger().error(
+                    reason + '; landing all UAVs'
+                )
+            return
+
+        if (
+            now_ns - self.last_arm_retry_ns
+            < self.arm_retry_interval * 1e9
+        ):
+            return
+
+        self.last_arm_retry_ns = now_ns
+
+        pending_text = ', '.join(
+            f'MAV{vehicle_id}:'
+            f'armed={state.armed},'
+            f'offboard={state.offboard_enabled}'
+            for vehicle_id, state in sorted(pending.items())
+        )
+        self.get_logger().warning(
+            'Retrying OFFBOARD/ARM for pending UAVs: '
+            f'{pending_text}'
+        )
+
+        for vehicle_id in sorted(pending):
+            vehicle = self.vehicles[vehicle_id]
+            state = pending[vehicle_id]
+            if not state.offboard_enabled:
+                vehicle.set_offboard_mode()
+            if not state.armed:
+                vehicle.arm()
 
     def follower_status_callback(self, message):
         if int(message.leader_id) != self.leader_manager.leader_id:

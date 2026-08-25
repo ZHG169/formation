@@ -3,6 +3,8 @@ leader_control_node:
     control_frequency: 50.0
     leader_id: 1
     command_timeout: 1.0
+    yaw_debug_enabled: true
+    yaw_debug_interval: 1.0
 
     vehicle_names:
       - MAV1

@@ -76,6 +76,7 @@ class VehicleInterface:
             vehicle_id=system_id,
             namespace=namespace,
         )
+        self.last_yaw_debug_ns = 0
 
         input_prefix = f'/{namespace}/fmu/in'
         output_prefix = f'/{namespace}/fmu/out'
@@ -305,7 +306,47 @@ class VehicleInterface:
             ]
 
         self.setpoint_publisher.publish(message)
+        self.log_yaw_debug_if_enabled(setpoint, message.yaw)
     
+    def node_parameter_value(self, name, default):
+        try:
+            return self.node.get_parameter(name).value
+        except Exception:
+            return default
+
+    def normalize_angle(self, angle):
+        return math.atan2(
+            math.sin(angle),
+            math.cos(angle),
+        )
+
+    def log_yaw_debug_if_enabled(self, setpoint, target_yaw_ned):
+        enabled = bool(
+            self.node_parameter_value('yaw_debug_enabled', False)
+        )
+        if not enabled:
+            return
+
+        interval = float(
+            self.node_parameter_value('yaw_debug_interval', 1.0)
+        )
+        now_ns = self.node.get_clock().now().nanoseconds
+        if now_ns - self.last_yaw_debug_ns < interval * 1e9:
+            return
+
+        self.last_yaw_debug_ns = now_ns
+        current_yaw = float(self.state.yaw_local_enu)
+        target_yaw = float(setpoint.yaw_local_enu)
+        yaw_error = self.normalize_angle(target_yaw - current_yaw)
+
+        self.node.get_logger().info(
+            f'Yaw debug {self.namespace}: '
+            f'current_enu={math.degrees(current_yaw):.1f} deg, '
+            f'target_enu={math.degrees(target_yaw):.1f} deg, '
+            f'target_ned={math.degrees(target_yaw_ned):.1f} deg, '
+            f'error={math.degrees(yaw_error):.1f} deg'
+        )
+
     def set_offboard_mode(self):
         # | `param2` | PX4 Custom Main Mode | 意義                  |
         # | -------: | -------------------- | ------------------- |

@@ -15,6 +15,15 @@ mission_node:
     formation_reference_yaw_enu: 0.0
     command_timeout: 1.0
 
+    # Offboard/Arm retry. Multi-PX4 may drop or reject one command,
+    # so mission_node retries only pending UAVs during TAKEOFF.
+    arm_retry_interval: 0.5
+    arm_retry_timeout: 8.0
+
+    # Print current yaw and target yaw when publishing setpoints.
+    yaw_debug_enabled: true
+    yaw_debug_interval: 1.0
+
     ready_hold_duration: 2.0
     offboard_warmup_duration: 2.0
     local_position_timeout: 2.0
