@@ -8,6 +8,10 @@ mission_node:
     formation_type: column
     formation_spacing: 1.2
     takeoff_height: 3.0
+    # Takeoff stabilization. Vehicles arm/offboard first, hold ground
+    # height, then climb together with a ramp.
+    liftoff_after_arm_timeout: 10.0
+    takeoff_climb_rate: 0.25
 
     # legacy reference mode parameters. leader_follower mode does not
     # use formation_reference_enu as the formation anchor.
@@ -45,6 +49,19 @@ mission_node:
     geofence_radius: 50.0
     maximum_setpoint_jump: 6.0
     formation_position_tolerance: 0.2
+
+
+    # Rectangular world fence in ROS ENU frame.
+    # x=east, y=north, z=up.
+    fence_enabled: false
+    fence_world_x_min: -1.7
+    fence_world_x_max: 1.7
+    fence_world_y_min: -1.5
+    fence_world_y_max: 1.5
+    fence_height_min: 0.0
+    fence_height_max: 1.4
+    fence_brake_distance_m: 0.35
+    near_fence_margin_m: 0.3
 
     vehicle_names:
       - MAV1

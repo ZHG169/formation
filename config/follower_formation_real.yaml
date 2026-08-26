@@ -42,3 +42,14 @@ follower_formation_node:
     cpf_max_speed: 0.6
     cpf_output_velocity: true
 
+
+    # Rectangular world fence in ROS ENU frame.
+    fence_enabled: true
+    fence_world_x_min: -1.7
+    fence_world_x_max: 1.7
+    fence_world_y_min: -1.5
+    fence_world_y_max: 1.5
+    fence_height_min: 0.0
+    fence_height_max: 1.4
+    fence_brake_distance_m: 0.35
+

@@ -34,6 +34,14 @@ class SafetyManager:
         maximum_speed=8.0,
         geofence_radius=50.0,
         maximum_setpoint_jump=5.0,
+        fence_enabled=False,
+        fence_world_x_min=-50.0,
+        fence_world_x_max=50.0,
+        fence_world_y_min=-50.0,
+        fence_world_y_max=50.0,
+        fence_height_min=0.0,
+        fence_height_max=20.0,
+        near_fence_margin_m=0.3,
     ):
         self.vehicle_origins = dict(vehicle_origins)
         self.position_timeout = float(position_timeout)
@@ -44,6 +52,14 @@ class SafetyManager:
         self.maximum_setpoint_jump = float(
             maximum_setpoint_jump
         )
+        self.fence_enabled = bool(fence_enabled)
+        self.fence_world_x_min = float(fence_world_x_min)
+        self.fence_world_x_max = float(fence_world_x_max)
+        self.fence_world_y_min = float(fence_world_y_min)
+        self.fence_world_y_max = float(fence_world_y_max)
+        self.fence_height_min = float(fence_height_min)
+        self.fence_height_max = float(fence_height_max)
+        self.near_fence_margin_m = float(near_fence_margin_m)
 
     @staticmethod
     def _result(violations):
@@ -65,6 +81,34 @@ class SafetyManager:
             self.vehicle_origins[vehicle_id],
             local_position,
         )
+
+
+    def _outside_rectangular_fence(self, position):
+        if not self.fence_enabled:
+            return False
+
+        return bool(
+            position.east < self.fence_world_x_min
+            or position.east > self.fence_world_x_max
+            or position.north < self.fence_world_y_min
+            or position.north > self.fence_world_y_max
+            or position.up < self.fence_height_min
+            or position.up > self.fence_height_max
+        )
+
+    def _near_rectangular_fence(self, position):
+        if not self.fence_enabled:
+            return False
+
+        margins = (
+            position.east - self.fence_world_x_min,
+            self.fence_world_x_max - position.east,
+            position.north - self.fence_world_y_min,
+            self.fence_world_y_max - position.north,
+            position.up - self.fence_height_min,
+            self.fence_height_max - position.up,
+        )
+        return min(margins) < self.near_fence_margin_m
 
     def check_states(self, states, now_ns):
         violations = []
@@ -116,10 +160,18 @@ class SafetyManager:
             )
             world_positions[vehicle_id] = world_position
 
-            if (
-                world_position.up < -0.5
-                or world_position.up > self.maximum_altitude
-            ):
+            if self.fence_enabled:
+                altitude_out_of_range = bool(
+                    world_position.up < self.fence_height_min
+                    or world_position.up > self.fence_height_max
+                )
+            else:
+                altitude_out_of_range = bool(
+                    world_position.up < -0.5
+                    or world_position.up > self.maximum_altitude
+                )
+
+            if altitude_out_of_range:
                 violations.append(
                     SafetyViolation(
                         'altitude_limit',
@@ -133,7 +185,13 @@ class SafetyManager:
                 world_position.east,
                 world_position.north,
             )
-            if horizontal_radius > self.geofence_radius:
+            outside_geofence = horizontal_radius > self.geofence_radius
+            if self.fence_enabled:
+                outside_geofence = self._outside_rectangular_fence(
+                    world_position
+                )
+
+            if outside_geofence:
                 violations.append(
                     SafetyViolation(
                         'geofence',
@@ -268,10 +326,18 @@ class SafetyManager:
                 # Do not apply position jump safety to velocity setpoints.
                 continue
 
-            if (
-                target_world.up < 0.0
-                or target_world.up > self.maximum_altitude
-            ):
+            if self.fence_enabled:
+                target_altitude_out_of_range = bool(
+                    target_world.up < self.fence_height_min
+                    or target_world.up > self.fence_height_max
+                )
+            else:
+                target_altitude_out_of_range = bool(
+                    target_world.up < 0.0
+                    or target_world.up > self.maximum_altitude
+                )
+
+            if target_altitude_out_of_range:
                 violations.append(
                     SafetyViolation(
                         'setpoint_altitude',
@@ -281,10 +347,16 @@ class SafetyManager:
                     )
                 )
 
-            if math.hypot(
+            target_outside_geofence = math.hypot(
                 target_world.east,
                 target_world.north,
-            ) > self.geofence_radius:
+            ) > self.geofence_radius
+            if self.fence_enabled:
+                target_outside_geofence = (
+                    self._outside_rectangular_fence(target_world)
+                )
+
+            if target_outside_geofence:
                 violations.append(
                     SafetyViolation(
                         'setpoint_geofence',

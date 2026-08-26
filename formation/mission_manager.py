@@ -41,6 +41,8 @@ class MissionManager:
         position_timeout=2.0,
         altitude_tolerance=0.3,
         land_command_interval=1.0,
+        liftoff_after_arm_timeout=10.0,
+        takeoff_climb_rate=0.25,
     ):
         self.state = MissionState.IDLE
 
@@ -52,10 +54,19 @@ class MissionManager:
         self.land_command_interval = float(
             land_command_interval
         )
+        self.liftoff_after_arm_timeout = float(
+            liftoff_after_arm_timeout
+        )
+        self.takeoff_climb_rate = float(takeoff_climb_rate)
 
         self.ready_since_ns = None
         self.warmup_start_ns = None
         self.takeoff_setpoints = {}
+        self.takeoff_home_setpoints = {}
+        self.takeoff_target_setpoints = {}
+        self.liftoff_authorized = False
+        self.armed_wait_start_ns = None
+        self.takeoff_ramp_start_ns = None
         self.land_command_pending = False
         self.last_land_command_ns = None
         self.fault_reason = ''
@@ -71,6 +82,11 @@ class MissionManager:
         self.ready_since_ns = None
         self.warmup_start_ns = None
         self.takeoff_setpoints = {}
+        self.takeoff_home_setpoints = {}
+        self.takeoff_target_setpoints = {}
+        self.liftoff_authorized = False
+        self.armed_wait_start_ns = None
+        self.takeoff_ramp_start_ns = None
         self.land_command_pending = False
         self.last_land_command_ns = None
         self.fault_reason = ''
@@ -162,8 +178,19 @@ class MissionManager:
     #   - Gazebo: local position + YAML spawn origin
     #   - real flight: PX4 local_position from OptiTrack/external vision
     def _capture_takeoff_setpoints(self, states):
-        self.takeoff_setpoints = {
-            vehicle_id: VehicleSetpoint(
+        self.takeoff_home_setpoints = {}
+        self.takeoff_target_setpoints = {}
+
+        for vehicle_id, state in states.items():
+            home = VehicleSetpoint(
+                position_local_enu=VectorENU(
+                    east=state.position_local_enu.east,
+                    north=state.position_local_enu.north,
+                    up=state.position_local_enu.up,
+                ),
+                yaw_local_enu=state.yaw_local_enu,
+            )
+            target = VehicleSetpoint(
                 position_local_enu=VectorENU(
                     east=state.position_local_enu.east,
                     north=state.position_local_enu.north,
@@ -171,8 +198,56 @@ class MissionManager:
                 ),
                 yaw_local_enu=state.yaw_local_enu,
             )
-            for vehicle_id, state in states.items()
-        }
+            self.takeoff_home_setpoints[vehicle_id] = home
+            self.takeoff_target_setpoints[vehicle_id] = target
+
+        self.takeoff_setpoints = dict(self.takeoff_home_setpoints)
+        self.liftoff_authorized = False
+        self.armed_wait_start_ns = None
+        self.takeoff_ramp_start_ns = None
+
+    def _all_armed_and_offboard(self, states):
+        return bool(states) and all(
+            state.armed and state.offboard_enabled
+            for state in states.values()
+        )
+
+    def _ramped_takeoff_setpoints(self, now_ns):
+        if self.takeoff_climb_rate <= 0.0:
+            return dict(self.takeoff_target_setpoints)
+
+        if self.takeoff_ramp_start_ns is None:
+            self.takeoff_ramp_start_ns = now_ns
+
+        elapsed = (now_ns - self.takeoff_ramp_start_ns) / 1e9
+        climb_distance = self.takeoff_climb_rate * elapsed
+        setpoints = {}
+
+        for vehicle_id, target in self.takeoff_target_setpoints.items():
+            home = self.takeoff_home_setpoints[vehicle_id]
+            home_up = home.position_local_enu.up
+            target_up = target.position_local_enu.up
+            delta_up = target_up - home_up
+
+            if abs(delta_up) <= 1e-6:
+                commanded_up = target_up
+            else:
+                direction = 1.0 if delta_up > 0.0 else -1.0
+                commanded_up = home_up + direction * min(
+                    abs(delta_up),
+                    climb_distance,
+                )
+
+            setpoints[vehicle_id] = VehicleSetpoint(
+                position_local_enu=VectorENU(
+                    east=target.position_local_enu.east,
+                    north=target.position_local_enu.north,
+                    up=commanded_up,
+                ),
+                yaw_local_enu=target.yaw_local_enu,
+            )
+
+        return setpoints
 
     def _all_at_takeoff_height(self, states):
         return bool(states) and all(
@@ -227,7 +302,7 @@ class MissionManager:
                 self.warmup_start_ns = now_ns
                 self.state = MissionState.OFFBOARD_WARMUP
                 output.publish_offboard = True
-                output.setpoints = dict(self.takeoff_setpoints)
+                output.setpoints = dict(self.takeoff_home_setpoints)
 
             return output
 
@@ -237,10 +312,15 @@ class MissionManager:
                 self.ready_since_ns = None
                 self.warmup_start_ns = None
                 self.takeoff_setpoints = {}
+                self.takeoff_home_setpoints = {}
+                self.takeoff_target_setpoints = {}
+                self.liftoff_authorized = False
+                self.armed_wait_start_ns = None
+                self.takeoff_ramp_start_ns = None
                 return output
 
             output.publish_offboard = True
-            output.setpoints = dict(self.takeoff_setpoints)
+            output.setpoints = dict(self.takeoff_home_setpoints)
 
             warmup_elapsed = (
                 now_ns - self.warmup_start_ns
@@ -254,16 +334,43 @@ class MissionManager:
 
         if self.state == MissionState.TAKEOFF:
             output.publish_offboard = True
-            output.setpoints = dict(self.takeoff_setpoints)
+
+            if not self.liftoff_authorized:
+                output.setpoints = dict(self.takeoff_home_setpoints)
+
+                if self.armed_wait_start_ns is None:
+                    self.armed_wait_start_ns = now_ns
+
+                elapsed = (
+                    now_ns - self.armed_wait_start_ns
+                ) / 1e9
+
+                if (
+                    self._all_armed_and_offboard(states)
+                    or elapsed >= self.liftoff_after_arm_timeout
+                ):
+                    self.liftoff_authorized = True
+                    self.takeoff_ramp_start_ns = now_ns
+                    output.setpoints = self._ramped_takeoff_setpoints(
+                        now_ns
+                    )
+
+                return output
+
+            output.setpoints = self._ramped_takeoff_setpoints(now_ns)
+            self.takeoff_setpoints = dict(output.setpoints)
 
             if self._all_at_takeoff_height(states):
+                self.takeoff_setpoints = dict(
+                    self.takeoff_target_setpoints
+                )
                 self.state = MissionState.WAITING_LEADER_COMMAND
 
             return output
 
         if self.state == MissionState.WAITING_LEADER_COMMAND:
             output.publish_offboard = True
-            output.setpoints = dict(self.takeoff_setpoints)
+            output.setpoints = dict(self.takeoff_target_setpoints)
             return output
 
         if self.state == MissionState.FORMATION:

@@ -61,6 +61,14 @@ class FollowerFormationNode(Node):
                 ('cpf_influence_distance', 3.0),
                 ('cpf_max_speed', 0.6),
                 ('cpf_output_velocity', True),
+                ('fence_enabled', False),
+                ('fence_world_x_min', -50.0),
+                ('fence_world_x_max', 50.0),
+                ('fence_world_y_min', -50.0),
+                ('fence_world_y_max', 50.0),
+                ('fence_height_min', 0.0),
+                ('fence_height_max', 20.0),
+                ('fence_brake_distance_m', 0.35),
             ],
         )
 
@@ -169,6 +177,30 @@ class FollowerFormationNode(Node):
             ),
             output_velocity=bool(
                 self.get_parameter('cpf_output_velocity').value
+            ),
+            fence_enabled=bool(
+                self.get_parameter('fence_enabled').value
+            ),
+            fence_world_x_min=float(
+                self.get_parameter('fence_world_x_min').value
+            ),
+            fence_world_x_max=float(
+                self.get_parameter('fence_world_x_max').value
+            ),
+            fence_world_y_min=float(
+                self.get_parameter('fence_world_y_min').value
+            ),
+            fence_world_y_max=float(
+                self.get_parameter('fence_world_y_max').value
+            ),
+            fence_height_min=float(
+                self.get_parameter('fence_height_min').value
+            ),
+            fence_height_max=float(
+                self.get_parameter('fence_height_max').value
+            ),
+            fence_brake_distance_m=float(
+                self.get_parameter('fence_brake_distance_m').value
             ),
         )
 
@@ -441,7 +473,7 @@ class FollowerFormationNode(Node):
             )
             setpoints[vehicle_id] = VehicleSetpoint(
                 position_local_enu=target_local,
-                yaw_local_enu=self.yaw_enu,
+                yaw_local_enu=state.yaw_local_enu,
             )
 
             current_world = add_vectors(

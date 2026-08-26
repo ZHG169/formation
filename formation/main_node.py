@@ -72,6 +72,8 @@ class MissionNode(Node):
                 ('formation_spacing', 2.0),
                 ('leader_id', 1),
                 ('takeoff_height', 0.5),
+                ('takeoff_climb_rate', 0.25),
+                ('liftoff_after_arm_timeout', 10.0),
                 ('ready_hold_duration', 2.0),
                 ('offboard_warmup_duration', 2.0),
                 ('local_position_timeout', 2.0),
@@ -89,6 +91,15 @@ class MissionNode(Node):
                 ('maximum_speed', 8.0),
                 ('geofence_radius', 50.0),
                 ('maximum_setpoint_jump', 5.0),
+                ('fence_enabled', False),
+                ('fence_world_x_min', -50.0),
+                ('fence_world_x_max', 50.0),
+                ('fence_world_y_min', -50.0),
+                ('fence_world_y_max', 50.0),
+                ('fence_height_min', 0.0),
+                ('fence_height_max', 20.0),
+                ('fence_brake_distance_m', 0.35),
+                ('near_fence_margin_m', 0.3),
                 ('formation_position_tolerance', 0.5),
                 ('formation_reference_enu', [
                     0.0, 0.0, 3.0,
@@ -136,6 +147,12 @@ class MissionNode(Node):
             ).value,
             land_command_interval=self.get_parameter(
                 'land_command_interval'
+            ).value,
+            liftoff_after_arm_timeout=self.get_parameter(
+                'liftoff_after_arm_timeout'
+            ).value,
+            takeoff_climb_rate=self.get_parameter(
+                'takeoff_climb_rate'
             ).value,
         )
 
@@ -195,6 +212,30 @@ class MissionNode(Node):
             maximum_setpoint_jump=self.get_parameter(
                 'maximum_setpoint_jump'
             ).value,
+            fence_enabled=self.get_parameter(
+                'fence_enabled'
+            ).value,
+            fence_world_x_min=self.get_parameter(
+                'fence_world_x_min'
+            ).value,
+            fence_world_x_max=self.get_parameter(
+                'fence_world_x_max'
+            ).value,
+            fence_world_y_min=self.get_parameter(
+                'fence_world_y_min'
+            ).value,
+            fence_world_y_max=self.get_parameter(
+                'fence_world_y_max'
+            ).value,
+            fence_height_min=self.get_parameter(
+                'fence_height_min'
+            ).value,
+            fence_height_max=self.get_parameter(
+                'fence_height_max'
+            ).value,
+            near_fence_margin_m=self.get_parameter(
+                'near_fence_margin_m'
+            ).value,
         )
 
         # 讀取yaml設定
@@ -244,6 +285,30 @@ class MissionNode(Node):
             ),
             output_velocity=bool(
                 self.get_parameter('cpf_output_velocity').value
+            ),
+            fence_enabled=bool(
+                self.get_parameter('fence_enabled').value
+            ),
+            fence_world_x_min=float(
+                self.get_parameter('fence_world_x_min').value
+            ),
+            fence_world_x_max=float(
+                self.get_parameter('fence_world_x_max').value
+            ),
+            fence_world_y_min=float(
+                self.get_parameter('fence_world_y_min').value
+            ),
+            fence_world_y_max=float(
+                self.get_parameter('fence_world_y_max').value
+            ),
+            fence_height_min=float(
+                self.get_parameter('fence_height_min').value
+            ),
+            fence_height_max=float(
+                self.get_parameter('fence_height_max').value
+            ),
+            fence_brake_distance_m=float(
+                self.get_parameter('fence_brake_distance_m').value
             ),
         )
 

@@ -14,10 +14,77 @@ class CpfConfig:
     influence_distance: float = 4.0
     max_speed: float = 0.8
     output_velocity: bool = True
+    fence_enabled: bool = False
+    fence_world_x_min: float = -50.0
+    fence_world_x_max: float = 50.0
+    fence_world_y_min: float = -50.0
+    fence_world_y_max: float = 50.0
+    fence_height_min: float = 0.0
+    fence_height_max: float = 20.0
+    fence_brake_distance_m: float = 0.35
 
 
 ZERO_VECTOR = VectorENU(0.0, 0.0, 0.0)
 
+
+
+def clamp_value(value, lower, upper):
+    return min(max(value, lower), upper)
+
+
+def clamp_position_to_fence(position, config):
+    if not config.fence_enabled:
+        return position
+
+    return VectorENU(
+        east=clamp_value(
+            position.east,
+            config.fence_world_x_min,
+            config.fence_world_x_max,
+        ),
+        north=clamp_value(
+            position.north,
+            config.fence_world_y_min,
+            config.fence_world_y_max,
+        ),
+        up=clamp_value(
+            position.up,
+            config.fence_height_min,
+            config.fence_height_max,
+        ),
+    )
+
+
+def limit_velocity_near_fence(current, velocity, config):
+    if not config.fence_enabled:
+        return velocity
+    if config.fence_brake_distance_m <= 1e-6:
+        return velocity
+
+    brake_distance = config.fence_brake_distance_m
+
+    def cap(margin):
+        ratio = clamp_value(margin / brake_distance, 0.0, 1.0)
+        return config.max_speed * ratio
+
+    east = velocity.east
+    north = velocity.north
+
+    if east > 0.0:
+        east = min(east, cap(config.fence_world_x_max - current.east))
+    elif east < 0.0:
+        east = max(east, -cap(current.east - config.fence_world_x_min))
+
+    if north > 0.0:
+        north = min(north, cap(config.fence_world_y_max - current.north))
+    elif north < 0.0:
+        north = max(north, -cap(current.north - config.fence_world_y_min))
+
+    return VectorENU(
+        east=east,
+        north=north,
+        up=velocity.up,
+    )
 
 def add_vectors(first, second):
     return VectorENU(
@@ -168,6 +235,7 @@ def apply_cpf_to_setpoints(
         origin = vehicle_origins[vehicle_id]
         current = current_world[vehicle_id]
         target = setpoint_world_position(nominal_setpoint, origin)
+        target = clamp_position_to_fence(target, config)
 
         attraction = scale_vector(
             subtract_vectors(target, current),
@@ -188,6 +256,11 @@ def apply_cpf_to_setpoints(
             add_vectors(attraction, repulsion),
             config.max_speed,
         )
+        velocity = limit_velocity_near_fence(
+            current,
+            velocity,
+            config,
+        )
 
         if config.output_velocity:
             safe_setpoints[vehicle_id] = VehicleSetpoint(
@@ -201,6 +274,7 @@ def apply_cpf_to_setpoints(
             current,
             scale_vector(velocity, dt_seconds),
         )
+        safe_world = clamp_position_to_fence(safe_world, config)
         safe_local = subtract_vectors(safe_world, origin)
 
         safe_setpoints[vehicle_id] = VehicleSetpoint(
