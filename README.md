@@ -23,6 +23,7 @@ follower_formation_node
 ## Main features
 
 - Three-UAV synchronized takeoff and landing
+- Takeoff stabilization with Offboard/Arm retry, armed barrier, and altitude ramp
 - PX4 Offboard control through `px4_msgs`
 - Leader-follower formation mode
 - Centralized and distributed control code kept for development/extension
@@ -33,7 +34,8 @@ follower_formation_node
 - Formation complete detection with position tolerance, speed tolerance, and hold duration
 - ROS ENU to PX4 NED coordinate conversion
 - Control Potential Field, CPF, velocity-based UAV avoidance
-- Safety checks for distance, speed, altitude, geofence, timeout, and setpoint validity
+- Safety checks for distance, speed, altitude, geofence/fence, timeout, and setpoint validity
+- Rectangular ENU world fence for real-flight testing, with velocity braking near boundaries
 
 ## Tested environment
 
@@ -55,9 +57,11 @@ formation/
 ├── package.xml
 ├── config/
 │   ├── mission.yaml
+│   ├── mission_real.yaml
 │   ├── leader_command.yaml
 │   ├── leader_control.yaml
 │   ├── follower_formation.yaml
+│   ├── follower_formation_real.yaml
 │   ├── distributed.yaml
 │   └── formation.yaml
 ├── docs/
@@ -78,6 +82,7 @@ formation/
 │   └── coordinate_convert.py
 ├── launch/
 │   ├── formation.launch.py
+│   ├── formation_real.launch.py
 │   └── multi_PX4.launch.py
 ├── msg/
 │   ├── FormationCommand.msg
@@ -233,7 +238,17 @@ IDLE
   -> LANDING / EMERGENCY_LANDING
 ```
 
-During `TAKEOFF`, `mission_node` controls all UAVs to the target takeoff height.
+During `TAKEOFF`, `mission_node` owns all UAV setpoints. The takeoff sequence is intentionally conservative:
+
+```text
+1. Warm up Offboard setpoints at the captured ground/home position
+2. Send Offboard + Arm commands
+3. Retry Offboard/Arm for UAVs that are still pending
+4. Hold all UAVs at their captured ground/home height until all are armed and in Offboard
+5. After all are ready, ramp the altitude setpoint toward takeoff_height
+```
+
+This avoids the case where one UAV arms earlier and starts climbing while the others are still waiting for PX4 to accept Offboard/Arm.
 
 After all UAVs reach the takeoff height, the mission waits in `WAITING_LEADER_COMMAND`. Formation motion does not start until a leader movement command is received.
 
@@ -244,6 +259,8 @@ During `FORMATION`:
 - `follower_formation_node` controls the follower UAVs.
 
 This avoids multiple nodes sending competing Offboard setpoints to the same PX4 instance.
+
+Follower yaw is not forced to the formation reference yaw by default. The formation position can still use the configured formation yaw/shape, while each vehicle can keep its current yaw unless a later yaw-control feature updates that behavior.
 
 ## Takeoff and landing
 
@@ -424,6 +441,31 @@ takeoff_height: 3.0
 command_timeout: 1.0
 ```
 
+Takeoff stabilization parameters:
+
+```yaml
+arm_retry_interval: 0.5
+arm_retry_timeout: 8.0
+liftoff_after_arm_timeout: 10.0
+takeoff_climb_rate: 0.25
+```
+
+Meaning:
+
+```text
+arm_retry_interval:
+    How often mission_node retries Offboard/Arm for pending UAVs during TAKEOFF.
+
+arm_retry_timeout:
+    How long to retry before reporting an Offboard/Arm timeout.
+
+liftoff_after_arm_timeout:
+    How long an already-armed UAV may hold at ground/home height while waiting for all UAVs to become armed/offboard.
+
+takeoff_climb_rate:
+    Maximum altitude setpoint ramp rate in m/s after liftoff is authorized.
+```
+
 Important follower formation parameters:
 
 ```yaml
@@ -454,6 +496,32 @@ maximum_speed: 3.0
 geofence_radius: 50.0
 maximum_setpoint_jump: 6.0
 ```
+
+Rectangular real-flight fence parameters:
+
+```yaml
+fence_enabled: true
+fence_world_x_min: -1.7
+fence_world_x_max: 1.7
+fence_world_y_min: -1.5
+fence_world_y_max: 1.5
+fence_height_min: 0.0
+fence_height_max: 1.4
+fence_brake_distance_m: 0.35
+near_fence_margin_m: 0.3
+```
+
+In this package, the fence uses ROS ENU naming:
+
+```text
+x = east
+y = north
+z = up
+```
+
+`SafetyManager` uses the rectangular fence to detect out-of-bounds states and setpoints. `leader_control_node` and `follower_formation_node` also apply velocity braking near fence boundaries so commands slow down before reaching the wall.
+
+For Gazebo profiles, `fence_enabled` is currently false by default because the simulation spawn offsets and takeoff altitude may exceed the small real-flight room fence. For real-flight profiles, `fence_enabled` is true.
 
 Vehicle world origins must match the Gazebo spawn positions:
 
@@ -500,8 +568,10 @@ For real-world testing, the recommended architecture is:
 
 ```text
 OptiTrack / Motive
-    -> ROS 2 pose topic
-    -> PX4 external vision / EKF2
+    -> VRPN / ROS 2 pose topic
+    -> mocap_px4_bridge, ENU to PX4-compatible odometry
+    -> /MAVx/fmu/in/vehicle_visual_odometry
+    -> PX4 EKF2
     -> /MAVx/fmu/out/vehicle_local_position_v1
     -> formation package
 ```
@@ -515,6 +585,8 @@ Gazebo:
 Real world:
     OptiTrack / external vision -> PX4 local position -> formation
 ```
+
+The rectangular fence assumes that PX4 `vehicle_local_position_v1` is aligned with the shared OptiTrack/external-vision world frame. Before flight, verify this by moving each vehicle by hand and checking that `/MAVx/fmu/out/vehicle_local_position_v1` changes consistently with the real room axes and fence limits.
 
 A future position-provider or mocap bridge can publish unified pose topics such as:
 
@@ -558,6 +630,10 @@ Current updates:
 - Added `follower_formation_real.yaml` for real-flight follower formation parameters.
 - Real-flight YAML sets `vehicle_origins_enu` to zero, assuming PX4 local position is already in the shared OptiTrack / external-vision frame.
 - Gazebo simulation keeps the original YAML files and spawn-origin offsets.
+- Added Offboard/Arm retry logging for multi-PX4 startup reliability.
+- Added armed/offboard liftoff barrier so armed vehicles hold ground/home height until the group is ready to climb.
+- Added altitude ramp for takeoff setpoints through `takeoff_climb_rate`.
+- Added rectangular ENU fence parameters and velocity braking near fence boundaries.
 
 ## TODO
 
@@ -568,6 +644,7 @@ Current updates:
   - Reuse the existing `leader_command_node -> leader_control_node -> follower_formation_node` pipeline.
   - Keep RC teleoperation as an optional real-flight feature, not enabled by default in the Gazebo launch.
 - Add real-world OptiTrack bridge implementation after validating PX4 EKF2 external-vision parameters.
+- Add position plausibility filtering similar to the C++ staged-testing node, for rejecting mocap/EKF jumps before they affect formation or fence calculations.
 - Later split `follower_formation_node` into per-vehicle `follower_vehicle_node` for true distributed onboard execution.
 
 ## License
