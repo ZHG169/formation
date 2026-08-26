@@ -203,7 +203,7 @@ class CentralizedFormationController(FormationController):
 
             commands[vehicle_id] = VehicleSetpoint(
                 position_local_enu=target_local,
-                yaw_local_enu=self.formation_reference.yaw_enu,
+                yaw_local_enu=state.yaw_local_enu,
             )
 
             current_world = add_vectors(
