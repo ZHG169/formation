@@ -3,9 +3,12 @@ from typing import Optional
 import math
 
 from px4_msgs.msg import (
+    FailsafeFlags,
+    HealthReport,
     OffboardControlMode,
     TrajectorySetpoint,
     VehicleCommand,
+    VehicleCommandAck,
     VehicleLandDetected,
     VehicleLocalPosition,
     VehicleStatus,
@@ -55,6 +58,21 @@ class VehicleState:
 
     nav_state: int = 0 #無人機導航狀態
     offboard_enabled: bool = False # PX4 是否進入 Offboard 外部控制模式
+
+    failsafe_received: bool = False
+    health_report_received: bool = False
+    command_ack_received: bool = False
+
+    preflight_reason: str = ''
+    health_error_flags: int = 0
+    arming_check_error_flags: int = 0
+
+    last_command_ack_command: int = 0
+    last_command_ack_name: str = ''
+    last_command_ack_result: int = 0
+    last_command_ack_result_name: str = ''
+    last_command_ack_result_param1: int = 0
+    last_command_ack_result_param2: int = 0
 
 
 @dataclass #無人機目標狀態
@@ -157,6 +175,49 @@ class VehicleInterface:
             )
         )
 
+        # PX4 起飛診斷資訊。不同 PX4/px4_msgs 版本 topic
+        # 命名可能有 _v1 或沒有 _v1，所以兩種都訂閱；
+        # 沒有資料的 topic 不會影響控制流程。
+        self.diagnostic_subscriptions = []
+        for topic_suffix in (
+            'failsafe_flags_v1',
+            'failsafe_flags',
+        ):
+            self.diagnostic_subscriptions.append(
+                self.node.create_subscription(
+                    FailsafeFlags,
+                    f'{output_prefix}/{topic_suffix}',
+                    self.failsafe_callback,
+                    qos,
+                )
+            )
+
+        for topic_suffix in (
+            'health_report_v1',
+            'health_report',
+        ):
+            self.diagnostic_subscriptions.append(
+                self.node.create_subscription(
+                    HealthReport,
+                    f'{output_prefix}/{topic_suffix}',
+                    self.health_report_callback,
+                    qos,
+                )
+            )
+
+        for topic_suffix in (
+            'vehicle_command_ack_v1',
+            'vehicle_command_ack',
+        ):
+            self.diagnostic_subscriptions.append(
+                self.node.create_subscription(
+                    VehicleCommandAck,
+                    f'{output_prefix}/{topic_suffix}',
+                    self.command_ack_callback,
+                    qos,
+                )
+            )
+
     def status_callback(self, message):
         self.state.status_received = True
         self.state.preflight_ok = bool(
@@ -174,6 +235,94 @@ class VehicleInterface:
             message.nav_state
             == VehicleStatus.NAVIGATION_STATE_OFFBOARD
         )
+
+    def failsafe_callback(self, message):
+        self.state.failsafe_received = True
+
+        reasons = []
+        checks = (
+            ('angular_velocity_invalid',
+             message.angular_velocity_invalid),
+            ('attitude_invalid', message.attitude_invalid),
+            ('local_altitude_invalid',
+             message.local_altitude_invalid),
+            ('local_position_invalid',
+             message.local_position_invalid),
+            ('local_velocity_invalid',
+             message.local_velocity_invalid),
+            ('global_position_invalid',
+             message.global_position_invalid),
+            ('offboard_signal_lost',
+             message.offboard_control_signal_lost),
+            ('home_position_invalid',
+             message.home_position_invalid),
+            ('manual_control_lost',
+             message.manual_control_signal_lost),
+            ('gcs_connection_lost',
+             message.gcs_connection_lost),
+            ('battery_low_remaining_time',
+             message.battery_low_remaining_time),
+            ('battery_unhealthy', message.battery_unhealthy),
+            ('geofence_breached', message.geofence_breached),
+            ('mission_failure', message.mission_failure),
+            ('wind_limit_exceeded', message.wind_limit_exceeded),
+            ('flight_time_limit_exceeded',
+             message.flight_time_limit_exceeded),
+            ('position_accuracy_low',
+             message.position_accuracy_low),
+            ('navigator_failure', message.navigator_failure),
+            ('failure_detector_critical',
+             message.fd_critical_failure),
+            ('esc_arming_failure',
+             message.fd_esc_arming_failure),
+            ('imbalanced_prop', message.fd_imbalanced_prop),
+            ('motor_failure', message.fd_motor_failure),
+        )
+
+        for name, active in checks:
+            if bool(active):
+                reasons.append(name)
+
+        self.state.preflight_reason = ','.join(reasons)
+
+    def health_report_callback(self, message):
+        self.state.health_report_received = True
+        self.state.health_error_flags = int(
+            message.health_error_flags
+        )
+        self.state.arming_check_error_flags = int(
+            message.arming_check_error_flags
+        )
+
+    def command_ack_callback(self, message):
+        self.state.command_ack_received = True
+        self.state.last_command_ack_command = int(message.command)
+        self.state.last_command_ack_name = self.command_name(
+            int(message.command)
+        )
+        self.state.last_command_ack_result = int(message.result)
+        self.state.last_command_ack_result_name = (
+            self.command_result_name(int(message.result))
+        )
+        self.state.last_command_ack_result_param1 = int(
+            message.result_param1
+        )
+        self.state.last_command_ack_result_param2 = int(
+            message.result_param2
+        )
+
+        accepted_results = {
+            VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED,
+            VehicleCommandAck.VEHICLE_CMD_RESULT_IN_PROGRESS,
+        }
+        if int(message.result) not in accepted_results:
+            self.node.get_logger().warning(
+                f'PX4 COMMAND_ACK {self.namespace}: '
+                f'command={self.state.last_command_ack_name}, '
+                f'result={self.state.last_command_ack_result_name}, '
+                f'param1={self.state.last_command_ack_result_param1}, '
+                f'param2={self.state.last_command_ack_result_param2}'
+            )
 
     # 檢查 position 是否是最新的，預設 timeout 2 秒，最後回傳 True / False。
     def position_is_fresh(
@@ -448,6 +597,59 @@ class VehicleInterface:
         message.from_external = True
 
         self.command_publisher.publish(message)
+
+    def command_name(self, command):
+        names = {
+            VehicleCommand.VEHICLE_CMD_DO_SET_MODE:
+                'DO_SET_MODE',
+            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM:
+                'ARM_DISARM',
+            VehicleCommand.VEHICLE_CMD_NAV_LAND:
+                'NAV_LAND',
+        }
+        return names.get(int(command), str(int(command)))
+
+    def command_result_name(self, result):
+        names = {
+            VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED:
+                'ACCEPTED',
+            VehicleCommandAck.VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED:
+                'TEMPORARILY_REJECTED',
+            VehicleCommandAck.VEHICLE_CMD_RESULT_DENIED:
+                'DENIED',
+            VehicleCommandAck.VEHICLE_CMD_RESULT_UNSUPPORTED:
+                'UNSUPPORTED',
+            VehicleCommandAck.VEHICLE_CMD_RESULT_FAILED:
+                'FAILED',
+            VehicleCommandAck.VEHICLE_CMD_RESULT_IN_PROGRESS:
+                'IN_PROGRESS',
+            VehicleCommandAck.VEHICLE_CMD_RESULT_CANCELLED:
+                'CANCELLED',
+        }
+        return names.get(int(result), str(int(result)))
+
+    def diagnostic_reason_text(self):
+        reasons = []
+
+        if self.state.preflight_reason:
+            reasons.append(self.state.preflight_reason)
+
+        if self.state.health_error_flags != 0:
+            reasons.append(
+                'health_error_flags='
+                f'{self.state.health_error_flags}'
+            )
+
+        if self.state.arming_check_error_flags != 0:
+            reasons.append(
+                'arming_check_error_flags='
+                f'{self.state.arming_check_error_flags}'
+            )
+
+        if not reasons:
+            return 'OK'
+
+        return ','.join(reasons)
 
     def timestamp_us(self):
         return self.node.get_clock().now().nanoseconds // 1000 # 取得時間 單位為微秒

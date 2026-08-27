@@ -10,7 +10,7 @@ follower_formation_node:
     formation_speed_tolerance: 0.15
     formation_hold_duration: 2.0
     local_position_timeout: 2.0
-    yaw_debug_enabled: true
+    yaw_debug_enabled: false
     yaw_debug_interval: 1.0
     target_debug_enabled: true
     target_debug_interval: 1.0

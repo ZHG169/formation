@@ -108,6 +108,7 @@ class MissionNode(Node):
                 ('command_timeout', 1.0),
                 ('arm_retry_interval', 0.5),
                 ('arm_retry_timeout', 8.0),
+                ('takeoff_diagnostic_interval', 2.0),
                 ('yaw_debug_enabled', False),
                 ('yaw_debug_interval', 1.0),
                 ('cpf_enabled', False),
@@ -368,6 +369,12 @@ class MissionNode(Node):
         self.arm_retry_timeout = float(
             self.get_parameter('arm_retry_timeout').value
         )
+        self.takeoff_diagnostic_interval = float(
+            self.get_parameter(
+                'takeoff_diagnostic_interval'
+            ).value
+        )
+        self.last_takeoff_diagnostic_ns = 0
         self.arm_retry_start_ns = 0
         self.last_arm_retry_ns = 0
         self.arm_retry_timeout_reported = False
@@ -603,13 +610,102 @@ class MissionNode(Node):
                 vehicle.land()
 
         if self.last_mission_state != self.mission_manager.state:
+            previous_state = self.last_mission_state
             self.get_logger().info(
                 'Mission state: '
-                f'{self.last_mission_state.name} -> '
+                f'{previous_state.name} -> '
                 f'{self.mission_manager.state.name}'
             )
             self.last_mission_state = self.mission_manager.state
 
+            if self.mission_manager.state in {
+                MissionState.WAITING_READY,
+                MissionState.OFFBOARD_WARMUP,
+                MissionState.TAKEOFF,
+            }:
+                self.log_takeoff_diagnostics(
+                    f'TAKEOFF STATE {self.mission_manager.state.name}'
+                )
+                self.last_takeoff_diagnostic_ns = now_ns
+
+        self.maybe_log_takeoff_diagnostics(now_ns)
+
+
+    def maybe_log_takeoff_diagnostics(self, now_ns):
+        if self.mission_manager.state not in {
+            MissionState.WAITING_READY,
+            MissionState.OFFBOARD_WARMUP,
+            MissionState.TAKEOFF,
+        }:
+            self.last_takeoff_diagnostic_ns = 0
+            return
+
+        if self.last_takeoff_diagnostic_ns == 0:
+            self.last_takeoff_diagnostic_ns = now_ns
+            return
+
+        if (
+            now_ns - self.last_takeoff_diagnostic_ns
+            < self.takeoff_diagnostic_interval * 1e9
+        ):
+            return
+
+        self.last_takeoff_diagnostic_ns = now_ns
+        self.log_takeoff_diagnostics('TAKEOFF DIAGNOSTICS')
+
+    def position_age_text(self, state, now_ns):
+        if not state.position_received:
+            return 'N/A'
+
+        age_seconds = (
+            now_ns - state.last_position_update_ns
+        ) / 1e9
+        return f'{age_seconds:.2f}s'
+
+    def log_takeoff_diagnostics(self, title):
+        now_ns = self.get_clock().now().nanoseconds
+        lines = [
+            '',
+            f'========== {title} ==========',
+        ]
+
+        for vehicle_id, vehicle in sorted(self.vehicles.items()):
+            state = vehicle.get_state()
+            reason_text = vehicle.diagnostic_reason_text()
+
+            lines.extend([
+                f'MAV{vehicle_id}:',
+                f'  status_received: {state.status_received}',
+                f'  position_received: {state.position_received}',
+                f'  position_age: {self.position_age_text(state, now_ns)}',
+                f'  preflight_ok: {state.preflight_ok}',
+                f'  armed: {state.armed}',
+                f'  offboard_enabled: {state.offboard_enabled}',
+                f'  nav_state: {state.nav_state}',
+                f'  landed: {state.landed}',
+                f'  position_valid: {state.position_valid}',
+                f'  failsafe_received: {state.failsafe_received}',
+                f'  health_report_received: '
+                f'{state.health_report_received}',
+                f'  diagnostic: {reason_text}',
+            ])
+
+            if state.command_ack_received:
+                lines.extend([
+                    f'  last_command_ack: '
+                    f'{state.last_command_ack_name}',
+                    f'  last_command_result: '
+                    f'{state.last_command_ack_result_name}',
+                    f'  last_command_result_param1: '
+                    f'{state.last_command_ack_result_param1}',
+                    f'  last_command_result_param2: '
+                    f'{state.last_command_ack_result_param2}',
+                ])
+            else:
+                lines.append('  last_command_ack: N/A')
+
+        lines.append('====================================')
+        self.get_logger().info('\n'.join(lines))
 
     def retry_offboard_and_arm_if_needed(self, now_ns):
         if self.mission_manager.state != MissionState.TAKEOFF:
@@ -846,6 +942,9 @@ class MissionNode(Node):
         del request
 
         response.success = self.mission_manager.request_takeoff()
+        if response.success:
+            self.log_takeoff_diagnostics('TAKEOFF REQUESTED')
+
         response.message = (
             'Takeoff sequence started'
             if response.success

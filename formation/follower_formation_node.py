@@ -430,9 +430,41 @@ class FollowerFormationNode(Node):
             )
         )
 
+    def lock_current_offsets(self, states):
+        positions = self.world_positions(states)
+
+        if self.active_leader_id not in positions:
+            raise ValueError(
+                f'Leader {self.active_leader_id} position unavailable'
+            )
+
+        leader_world = positions[self.active_leader_id]
+        self.slot_offsets = {
+            self.active_leader_id: VectorENU(0.0, 0.0, 0.0),
+        }
+
+        for vehicle_id, position in positions.items():
+            if vehicle_id == self.active_leader_id:
+                continue
+
+            self.slot_offsets[vehicle_id] = subtract_vectors(
+                position,
+                leader_world,
+            )
+
+        self.get_logger().info(
+            'Current relative offsets locked for formation stabilize: '
+            + ', '.join(
+                f'MAV{vehicle_id}=({offset.east:.2f}, '
+                f'{offset.north:.2f}, {offset.up:.2f})'
+                for vehicle_id, offset
+                in sorted(self.slot_offsets.items())
+            )
+        )
+
     def calculate_follower_setpoints(self, states):
-        if self.slot_offsets is None or not self.slot_assignment_lock:
-            self.assign_slots_by_minimum_distance(states)
+        if self.slot_offsets is None:
+            self.lock_current_offsets(states)
 
         if self.active_leader_id not in states:
             return {}
@@ -444,10 +476,7 @@ class FollowerFormationNode(Node):
             self.vehicle_origins[self.active_leader_id],
             leader_state.position_local_enu,
         )
-        leader_offset = rotate_offset(
-            self.slot_offsets[self.active_leader_id],
-            self.yaw_enu,
-        )
+        leader_offset = self.slot_offsets[self.active_leader_id]
         anchor_world = subtract_vectors(
             leader_world,
             leader_offset,
@@ -463,10 +492,7 @@ class FollowerFormationNode(Node):
             if vehicle_id not in self.slot_offsets:
                 continue
 
-            rotated_offset = rotate_offset(
-                self.slot_offsets[vehicle_id],
-                self.yaw_enu,
-            )
+            rotated_offset = self.slot_offsets[vehicle_id]
             target_world = add_vectors(
                 anchor_world,
                 rotated_offset,

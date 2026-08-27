@@ -24,6 +24,7 @@ follower_formation_node
 
 - Three-UAV synchronized takeoff and landing
 - Takeoff stabilization with Offboard/Arm retry, armed barrier, and altitude ramp
+- Takeoff diagnostics with PX4 failsafe flags, health report, and command ack summary
 - PX4 Offboard control through `px4_msgs`
 - Leader-follower formation mode
 - Centralized and distributed control code kept for development/extension
@@ -278,6 +279,67 @@ ros2 service call /formation/land std_srvs/srv/Trigger "{}"
 
 After emergency landing, the system may wait for ground confirmation depending on mission state.
 
+## Takeoff diagnostics
+
+When `/formation/takeoff` is accepted, `mission_node` prints a diagnostic summary for each UAV. The same summary is also printed when the mission enters key takeoff states and periodically while waiting for takeoff readiness.
+
+Example:
+
+```text
+========== TAKEOFF REQUESTED ==========
+MAV1:
+  status_received: True
+  position_received: True
+  position_age: 0.03s
+  preflight_ok: True
+  armed: False
+  offboard_enabled: False
+  nav_state: 2
+  landed: True
+  position_valid: True
+  failsafe_received: True
+  health_report_received: True
+  diagnostic: OK
+  last_command_ack: N/A
+MAV2:
+  ...
+  diagnostic: local_position_invalid,home_position_invalid
+  last_command_ack: ARM_DISARM
+  last_command_result: DENIED
+====================================
+```
+
+The diagnostic fields are collected from PX4 output topics when available:
+
+```text
+/MAVx/fmu/out/failsafe_flags_v1
+/MAVx/fmu/out/health_report_v1
+/MAVx/fmu/out/vehicle_command_ack_v1
+```
+
+For compatibility with different PX4 / `px4_msgs` versions, the node also subscribes to the same names without `_v1`:
+
+```text
+/MAVx/fmu/out/failsafe_flags
+/MAVx/fmu/out/health_report
+/MAVx/fmu/out/vehicle_command_ack
+```
+
+Useful cases:
+
+```text
+preflight_ok = false + local_position_invalid:
+    PX4 does not have a valid local position estimate. Offboard takeoff should not continue.
+
+preflight_ok = true + offboard_signal_lost:
+    PX4 is basically healthy, but Offboard heartbeat/setpoint input is not stable.
+
+last_command_result = DENIED / TEMPORARILY_REJECTED:
+    PX4 rejected the ROS command, even if manual RC arming may work.
+```
+
+This is especially useful when RC arming works but `/formation/takeoff` does not. In that case, check `last_command_ack`, `last_command_result`, and `diagnostic` for the UAV that did not take off.
+
 ## Leader command
 
 External user input should be sent to:
@@ -298,10 +360,10 @@ Example: move the leader toward east and south for 10 seconds while using column
 ros2 topic pub --once /formation/leader_input formation/msg/FormationCommand "{
   command: 1,
   velocity_east: 0.2,
-  velocity_north: -0.2,
+  velocity_north: 0.0,
   velocity_up: 0.0,
   yaw_rate: 0.0,
-  duration: 10.0,
+  duration: 0.5,
   formation_type: 'column',
   spacing: 1.2
 }"
@@ -446,6 +508,7 @@ Takeoff stabilization parameters:
 ```yaml
 arm_retry_interval: 0.5
 arm_retry_timeout: 8.0
+takeoff_diagnostic_interval: 2.0
 liftoff_after_arm_timeout: 10.0
 takeoff_climb_rate: 0.25
 ```
@@ -458,6 +521,9 @@ arm_retry_interval:
 
 arm_retry_timeout:
     How long to retry before reporting an Offboard/Arm timeout.
+
+takeoff_diagnostic_interval:
+    How often mission_node prints takeoff diagnostics while waiting for readiness.
 
 liftoff_after_arm_timeout:
     How long an already-armed UAV may hold at ground/home height while waiting for all UAVs to become armed/offboard.
@@ -617,7 +683,8 @@ These notes explain each source file, configuration file, launch file, msg, and 
 - Do not run multiple Offboard controllers for the same PX4 instance at the same time.
 - In leader-follower mode, `mission_node` owns takeoff/landing, while `leader_control_node` and `follower_formation_node` own formation-stage movement.
 - If Gazebo reports the vehicle is flying but the model does not move, check PX4 `gz_bridge`, Gazebo physics state, and motor command topics.
-- If `/formation/takeoff` succeeds but the mission stays in `WAITING_READY`, check PX4 preflight, local position, DDS topics, and Micro XRCE-DDS Agent connection.
+- If `/formation/takeoff` succeeds but the mission stays in `WAITING_READY`, check PX4 preflight, local position, DDS topics, Micro XRCE-DDS Agent connection, and the printed takeoff diagnostics.
+- If RC/manual arming works but ROS takeoff does not, check `vehicle_command_ack`: PX4 may be rejecting Offboard mode or external arm commands even though manual arming is allowed.
 - If `/formation/leader_input` does not move the leader, check whether `/formation/status` has reached `WAITING_LEADER_COMMAND` or `FORMATION`, and verify `/formation/command` is being published.
 
 ## Recent development summary

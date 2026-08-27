@@ -69,6 +69,36 @@ class LeaderManager:
             return VehicleHealth(False, 'status_missing')
 
         if not state.preflight_ok:
+            reason = getattr(state, 'preflight_reason', '')
+            if not reason:
+                health_error_flags = getattr(
+                    state,
+                    'health_error_flags',
+                    0,
+                )
+                arming_check_error_flags = getattr(
+                    state,
+                    'arming_check_error_flags',
+                    0,
+                )
+                extra = []
+                if health_error_flags:
+                    extra.append(
+                        f'health_error_flags={health_error_flags}'
+                    )
+                if arming_check_error_flags:
+                    extra.append(
+                        'arming_check_error_flags='
+                        f'{arming_check_error_flags}'
+                    )
+                reason = ','.join(extra)
+
+            if reason:
+                return VehicleHealth(
+                    False,
+                    f'preflight_failed:{reason}',
+                )
+
             return VehicleHealth(False, 'preflight_failed')
 
         if not state.position_received:
