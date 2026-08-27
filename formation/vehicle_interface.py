@@ -77,6 +77,7 @@ class VehicleInterface:
             namespace=namespace,
         )
         self.last_yaw_debug_ns = 0
+        self.last_target_debug_ns = 0
 
         input_prefix = f'/{namespace}/fmu/in'
         output_prefix = f'/{namespace}/fmu/out'
@@ -307,6 +308,7 @@ class VehicleInterface:
 
         self.setpoint_publisher.publish(message)
         self.log_yaw_debug_if_enabled(setpoint, message.yaw)
+        self.log_target_debug_if_enabled(setpoint, message)
     
     def node_parameter_value(self, name, default):
         try:
@@ -345,6 +347,48 @@ class VehicleInterface:
             f'target_enu={math.degrees(target_yaw):.1f} deg, '
             f'target_ned={math.degrees(target_yaw_ned):.1f} deg, '
             f'error={math.degrees(yaw_error):.1f} deg'
+        )
+
+
+    def log_target_debug_if_enabled(self, setpoint, px4_message):
+        enabled = bool(
+            self.node_parameter_value('target_debug_enabled', False)
+        )
+        if not enabled:
+            return
+
+        interval = float(
+            self.node_parameter_value('target_debug_interval', 1.0)
+        )
+        now_ns = self.node.get_clock().now().nanoseconds
+        if now_ns - self.last_target_debug_ns < interval * 1e9:
+            return
+
+        self.last_target_debug_ns = now_ns
+
+        if setpoint.velocity_local_enu is not None:
+            velocity = setpoint.velocity_local_enu
+            self.node.get_logger().info(
+                f'PX4 setpoint debug {self.namespace}: '
+                'mode=velocity, '
+                f'velocity_enu=({velocity.east:.2f}, '
+                f'{velocity.north:.2f}, {velocity.up:.2f}), '
+                f'velocity_ned=({px4_message.velocity[0]:.2f}, '
+                f'{px4_message.velocity[1]:.2f}, '
+                f'{px4_message.velocity[2]:.2f}), '
+                'position_ned=(nan, nan, nan)'
+            )
+            return
+
+        target = setpoint.position_local_enu
+        self.node.get_logger().info(
+            f'PX4 setpoint debug {self.namespace}: '
+            'mode=position, '
+            f'target_local_enu=({target.east:.2f}, '
+            f'{target.north:.2f}, {target.up:.2f}), '
+            f'target_ned=({px4_message.position[0]:.2f}, '
+            f'{px4_message.position[1]:.2f}, '
+            f'{px4_message.position[2]:.2f})'
         )
 
     def set_offboard_mode(self):

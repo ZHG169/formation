@@ -27,6 +27,8 @@ mission_node:
     # Print current yaw and target yaw when publishing setpoints.
     yaw_debug_enabled: true
     yaw_debug_interval: 1.0
+    target_debug_enabled: true
+    target_debug_interval: 1.0
 
     ready_hold_duration: 2.0
     offboard_warmup_duration: 2.0

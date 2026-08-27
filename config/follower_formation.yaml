@@ -12,6 +12,8 @@ follower_formation_node:
     local_position_timeout: 2.0
     yaw_debug_enabled: true
     yaw_debug_interval: 1.0
+    target_debug_enabled: true
+    target_debug_interval: 1.0
     slot_assignment_lock: true
 
     vehicle_names:

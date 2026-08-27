@@ -31,6 +31,8 @@ class LeaderControlNode(Node):
                 ('command_timeout', 1.0),
                 ('yaw_debug_enabled', False),
                 ('yaw_debug_interval', 1.0),
+                ('target_debug_enabled', False),
+                ('target_debug_interval', 1.0),
                 ('cpf_max_speed', 0.6),
                 ('fence_enabled', False),
                 ('fence_world_x_min', -50.0),
@@ -82,6 +84,7 @@ class LeaderControlNode(Node):
             self.get_parameter('command_timeout').value
         )
         self.hold_yaw_enu = 0.0
+        self.last_target_debug_ns = 0
         self.fence_config = CpfConfig(
             enabled=False,
             max_speed=float(
@@ -177,6 +180,38 @@ class LeaderControlNode(Node):
         ) / 1e9
         return 0.0 <= age_seconds <= self.command_timeout
 
+    def log_leader_target_debug(self, state, velocity, command, now_ns):
+        enabled = bool(
+            self.get_parameter('target_debug_enabled').value
+        )
+        if not enabled:
+            return
+
+        interval = float(
+            self.get_parameter('target_debug_interval').value
+        )
+        if now_ns - self.last_target_debug_ns < interval * 1e9:
+            return
+
+        self.last_target_debug_ns = now_ns
+        current = state.position_local_enu
+        duration = max(float(command.duration), 0.0)
+        predicted = VectorENU(
+            east=current.east + velocity.east * duration,
+            north=current.north + velocity.north * duration,
+            up=current.up + velocity.up * duration,
+        )
+        self.get_logger().info(
+            f'Leader target debug MAV{self.active_leader_id}: '
+            f'current_local_enu=({current.east:.2f}, '
+            f'{current.north:.2f}, {current.up:.2f}), '
+            f'velocity_cmd_enu=({velocity.east:.2f}, '
+            f'{velocity.north:.2f}, {velocity.up:.2f}), '
+            f'duration={duration:.2f}s, '
+            f'predicted_end_local_enu=({predicted.east:.2f}, '
+            f'{predicted.north:.2f}, {predicted.up:.2f})'
+        )
+
     def control_loop(self):
         if not self.formation_active():
             return
@@ -213,6 +248,12 @@ class LeaderControlNode(Node):
                     state.position_local_enu,
                     velocity,
                     self.fence_config,
+                )
+                self.log_leader_target_debug(
+                    state,
+                    velocity,
+                    command,
+                    now_ns,
                 )
                 setpoint = VehicleSetpoint(
                     position_local_enu=state.position_local_enu,

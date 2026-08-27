@@ -46,6 +46,8 @@ class FollowerFormationNode(Node):
                 ('local_position_timeout', 2.0),
                 ('yaw_debug_enabled', False),
                 ('yaw_debug_interval', 1.0),
+                ('target_debug_enabled', False),
+                ('target_debug_interval', 1.0),
                 ('vehicle_names', ['MAV1', 'MAV2', 'MAV3']),
                 ('vehicle_system_ids', [1, 2, 3]),
                 ('vehicle_origins_enu', [
@@ -206,6 +208,7 @@ class FollowerFormationNode(Node):
 
         self.maximum_position_error = 0.0
         self.maximum_follower_speed = math.inf
+        self.last_target_debug_ns = 0
         self.formation_ready_since_ns = None
         self.last_formation_ready = False
 
@@ -451,6 +454,7 @@ class FollowerFormationNode(Node):
         )
 
         setpoints = {}
+        target_debug_rows = []
         maximum_error = 0.0
 
         for vehicle_id, state in states.items():
@@ -480,19 +484,92 @@ class FollowerFormationNode(Node):
                 self.vehicle_origins[vehicle_id],
                 state.position_local_enu,
             )
+            target_debug_rows.append({
+                'vehicle_id': vehicle_id,
+                'leader_world': leader_world,
+                'anchor_world': anchor_world,
+                'offset': self.slot_offsets[vehicle_id],
+                'rotated_offset': rotated_offset,
+                'current_world': current_world,
+                'target_world': target_world,
+                'target_local': target_local,
+            })
             maximum_error = max(
                 maximum_error,
                 vector_distance(current_world, target_world),
             )
 
         self.maximum_position_error = maximum_error
-        return apply_cpf_to_setpoints(
+        safe_setpoints = apply_cpf_to_setpoints(
             states=states,
             nominal_setpoints=setpoints,
             vehicle_origins=self.vehicle_origins,
             config=self.cpf_config,
             dt_seconds=self.control_period,
         )
+        self.log_follower_target_debug_if_enabled(
+            target_debug_rows,
+            safe_setpoints,
+        )
+        return safe_setpoints
+
+    def log_follower_target_debug_if_enabled(
+        self,
+        rows,
+        safe_setpoints,
+    ):
+        enabled = bool(
+            self.get_parameter('target_debug_enabled').value
+        )
+        if not enabled:
+            return
+
+        interval = float(
+            self.get_parameter('target_debug_interval').value
+        )
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns - self.last_target_debug_ns < interval * 1e9:
+            return
+
+        self.last_target_debug_ns = now_ns
+
+        for row in rows:
+            vehicle_id = row['vehicle_id']
+            setpoint = safe_setpoints.get(vehicle_id)
+            velocity_text = 'none'
+            if (
+                setpoint is not None
+                and setpoint.velocity_local_enu is not None
+            ):
+                velocity = setpoint.velocity_local_enu
+                velocity_text = (
+                    f'({velocity.east:.2f}, '
+                    f'{velocity.north:.2f}, {velocity.up:.2f})'
+                )
+
+            leader = row['leader_world']
+            offset = row['offset']
+            rotated = row['rotated_offset']
+            current = row['current_world']
+            target_world = row['target_world']
+            target_local = row['target_local']
+
+            self.get_logger().info(
+                f'Follower target debug MAV{vehicle_id}: '
+                f'leader_world_enu=({leader.east:.2f}, '
+                f'{leader.north:.2f}, {leader.up:.2f}), '
+                f'slot_offset=({offset.east:.2f}, '
+                f'{offset.north:.2f}, {offset.up:.2f}), '
+                f'rotated_offset=({rotated.east:.2f}, '
+                f'{rotated.north:.2f}, {rotated.up:.2f}), '
+                f'current_world_enu=({current.east:.2f}, '
+                f'{current.north:.2f}, {current.up:.2f}), '
+                f'target_world_enu=({target_world.east:.2f}, '
+                f'{target_world.north:.2f}, {target_world.up:.2f}), '
+                f'target_local_enu=({target_local.east:.2f}, '
+                f'{target_local.north:.2f}, {target_local.up:.2f}), '
+                f'cpf_velocity_enu={velocity_text}'
+            )
 
     def control_loop(self):
         if not self.formation_active():

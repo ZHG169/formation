@@ -5,6 +5,8 @@ leader_control_node:
     command_timeout: 1.0
     yaw_debug_enabled: true
     yaw_debug_interval: 1.0
+    target_debug_enabled: true
+    target_debug_interval: 1.0
     cpf_max_speed: 0.6
 
 
