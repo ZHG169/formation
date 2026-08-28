@@ -3,7 +3,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 from formation.coordinate_convert import VectorENU
-from formation.cpf_avoidance import CpfConfig, limit_velocity_near_fence
+from formation.fence_limiter import FenceConfig, limit_velocity_near_fence
 from formation.msg import FormationCommand, FormationStatus
 from formation.mission_manager import MissionState
 from formation.vehicle_interface import VehicleInterface, VehicleSetpoint
@@ -85,34 +85,33 @@ class LeaderControlNode(Node):
         )
         self.hold_yaw_enu = 0.0
         self.last_target_debug_ns = 0
-        self.fence_config = CpfConfig(
-            enabled=False,
-            max_speed=float(
-                self.get_parameter('cpf_max_speed').value
-            ),
-            fence_enabled=bool(
+        self.fence_config = FenceConfig(
+            enabled=bool(
                 self.get_parameter('fence_enabled').value
             ),
-            fence_world_x_min=float(
+            world_x_min=float(
                 self.get_parameter('fence_world_x_min').value
             ),
-            fence_world_x_max=float(
+            world_x_max=float(
                 self.get_parameter('fence_world_x_max').value
             ),
-            fence_world_y_min=float(
+            world_y_min=float(
                 self.get_parameter('fence_world_y_min').value
             ),
-            fence_world_y_max=float(
+            world_y_max=float(
                 self.get_parameter('fence_world_y_max').value
             ),
-            fence_height_min=float(
+            height_min=float(
                 self.get_parameter('fence_height_min').value
             ),
-            fence_height_max=float(
+            height_max=float(
                 self.get_parameter('fence_height_max').value
             ),
-            fence_brake_distance_m=float(
+            brake_distance_m=float(
                 self.get_parameter('fence_brake_distance_m').value
+            ),
+            max_speed=float(
+                self.get_parameter('cpf_max_speed').value
             ),
         )
 

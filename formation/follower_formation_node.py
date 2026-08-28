@@ -8,9 +8,15 @@ from rclpy.node import Node
 from formation.coordinate_convert import VectorENU
 from formation.cpf_avoidance import (
     CpfConfig,
-    apply_cpf_to_setpoints,
+    add_vectors as add_cpf_vectors,
     limit_vector,
+    repulsion_from_neighbors,
     scale_vector,
+)
+from formation.fence_limiter import (
+    FenceConfig,
+    clamp_position_to_fence,
+    limit_velocity_near_fence,
 )
 from formation.formation_controller import (
     add_vectors,
@@ -185,9 +191,7 @@ class FollowerFormationNode(Node):
             enabled=bool(
                 self.get_parameter('cpf_enabled').value
             ),
-            attraction_gain=float(
-                self.get_parameter('cpf_attraction_gain').value
-            ),
+            attraction_gain=0.0,
             repulsion_gain=float(
                 self.get_parameter('cpf_repulsion_gain').value
             ),
@@ -200,32 +204,35 @@ class FollowerFormationNode(Node):
             max_speed=float(
                 self.get_parameter('cpf_max_speed').value
             ),
-            output_velocity=bool(
-                self.get_parameter('cpf_output_velocity').value
-            ),
-            fence_enabled=bool(
+            output_velocity=True,
+        )
+        self.fence_config = FenceConfig(
+            enabled=bool(
                 self.get_parameter('fence_enabled').value
             ),
-            fence_world_x_min=float(
+            world_x_min=float(
                 self.get_parameter('fence_world_x_min').value
             ),
-            fence_world_x_max=float(
+            world_x_max=float(
                 self.get_parameter('fence_world_x_max').value
             ),
-            fence_world_y_min=float(
+            world_y_min=float(
                 self.get_parameter('fence_world_y_min').value
             ),
-            fence_world_y_max=float(
+            world_y_max=float(
                 self.get_parameter('fence_world_y_max').value
             ),
-            fence_height_min=float(
+            height_min=float(
                 self.get_parameter('fence_height_min').value
             ),
-            fence_height_max=float(
+            height_max=float(
                 self.get_parameter('fence_height_max').value
             ),
-            fence_brake_distance_m=float(
+            brake_distance_m=float(
                 self.get_parameter('fence_brake_distance_m').value
+            ),
+            max_speed=float(
+                self.get_parameter('cpf_max_speed').value
             ),
         )
 
@@ -485,6 +492,42 @@ class FollowerFormationNode(Node):
             )
         )
 
+    def build_current_world_positions(self, states):
+        positions = {}
+
+        for vehicle_id, state in states.items():
+            if vehicle_id not in self.vehicle_origins:
+                continue
+            if (
+                not state.position_valid
+                or state.position_local_enu is None
+            ):
+                continue
+
+            positions[vehicle_id] = add_vectors(
+                self.vehicle_origins[vehicle_id],
+                state.position_local_enu,
+            )
+
+        return positions
+
+    def calculate_cpf_avoidance_velocity(
+        self,
+        vehicle_id,
+        current_world_positions,
+    ):
+        if not self.cpf_config.enabled:
+            return VectorENU(0.0, 0.0, 0.0)
+
+        return limit_vector(
+            repulsion_from_neighbors(
+                vehicle_id,
+                current_world_positions,
+                self.cpf_config,
+            ),
+            self.cpf_config.max_speed,
+        )
+
     def calculate_tracking_velocity(
         self,
         current_world,
@@ -549,6 +592,10 @@ class FollowerFormationNode(Node):
             else VectorENU(0.0, 0.0, 0.0)
         )
 
+        current_world_positions = self.build_current_world_positions(
+            states
+        )
+
         setpoints = {}
         target_debug_rows = []
         maximum_error = 0.0
@@ -560,27 +607,48 @@ class FollowerFormationNode(Node):
                 continue
 
             rotated_offset = self.slot_offsets[vehicle_id]
-            target_world = add_vectors(
+            raw_target_world = add_vectors(
                 anchor_world,
                 rotated_offset,
+            )
+            target_world = clamp_position_to_fence(
+                raw_target_world,
+                self.fence_config,
             )
             target_local = subtract_vectors(
                 target_world,
                 self.vehicle_origins[vehicle_id],
             )
-            current_world = add_vectors(
-                self.vehicle_origins[vehicle_id],
-                state.position_local_enu,
-            )
+            current_world = current_world_positions.get(vehicle_id)
+            if current_world is None:
+                continue
+
             tracking_velocity = self.calculate_tracking_velocity(
                 current_world=current_world,
                 target_world=target_world,
                 leader_velocity=leader_velocity,
             )
+            avoidance_velocity = self.calculate_cpf_avoidance_velocity(
+                vehicle_id,
+                current_world_positions,
+            )
+            commanded_velocity = limit_vector(
+                add_cpf_vectors(
+                    tracking_velocity,
+                    avoidance_velocity,
+                ),
+                self.cpf_config.max_speed,
+            )
+            commanded_velocity = limit_velocity_near_fence(
+                current_world,
+                commanded_velocity,
+                self.fence_config,
+            )
+
             setpoints[vehicle_id] = VehicleSetpoint(
                 position_local_enu=target_local,
                 yaw_local_enu=state.yaw_local_enu,
-                velocity_local_enu=tracking_velocity,
+                velocity_local_enu=commanded_velocity,
             )
 
             target_debug_rows.append({
@@ -590,10 +658,12 @@ class FollowerFormationNode(Node):
                 'offset': self.slot_offsets[vehicle_id],
                 'rotated_offset': rotated_offset,
                 'current_world': current_world,
+                'raw_target_world': raw_target_world,
                 'target_world': target_world,
                 'target_local': target_local,
                 'leader_velocity': leader_velocity,
                 'tracking_velocity': tracking_velocity,
+                'avoidance_velocity': avoidance_velocity,
             })
             maximum_error = max(
                 maximum_error,
@@ -601,18 +671,11 @@ class FollowerFormationNode(Node):
             )
 
         self.maximum_position_error = maximum_error
-        safe_setpoints = apply_cpf_to_setpoints(
-            states=states,
-            nominal_setpoints=setpoints,
-            vehicle_origins=self.vehicle_origins,
-            config=self.cpf_config,
-            dt_seconds=self.control_period,
-        )
         self.log_follower_target_debug_if_enabled(
             target_debug_rows,
-            safe_setpoints,
+            setpoints,
         )
-        return safe_setpoints
+        return setpoints
 
     def log_follower_target_debug_if_enabled(
         self,
@@ -652,10 +715,12 @@ class FollowerFormationNode(Node):
             offset = row['offset']
             rotated = row['rotated_offset']
             current = row['current_world']
+            raw_target_world = row['raw_target_world']
             target_world = row['target_world']
             target_local = row['target_local']
             leader_velocity = row['leader_velocity']
             tracking_velocity = row['tracking_velocity']
+            avoidance_velocity = row['avoidance_velocity']
 
             self.get_logger().info(
                 f'Follower target debug MAV{vehicle_id}: '
@@ -667,7 +732,10 @@ class FollowerFormationNode(Node):
                 f'{rotated.north:.2f}, {rotated.up:.2f}), '
                 f'current_world_enu=({current.east:.2f}, '
                 f'{current.north:.2f}, {current.up:.2f}), '
-                f'target_world_enu=({target_world.east:.2f}, '
+                f'raw_target_world_enu=({raw_target_world.east:.2f}, '
+                f'{raw_target_world.north:.2f}, '
+                f'{raw_target_world.up:.2f}), '
+                f'safe_target_world_enu=({target_world.east:.2f}, '
                 f'{target_world.north:.2f}, {target_world.up:.2f}), '
                 f'target_local_enu=({target_local.east:.2f}, '
                 f'{target_local.north:.2f}, {target_local.up:.2f}), '
@@ -677,7 +745,10 @@ class FollowerFormationNode(Node):
                 f'tracking_velocity_enu=({tracking_velocity.east:.2f}, '
                 f'{tracking_velocity.north:.2f}, '
                 f'{tracking_velocity.up:.2f}), '
-                f'cpf_velocity_enu={velocity_text}'
+                f'cpf_avoidance_enu=({avoidance_velocity.east:.2f}, '
+                f'{avoidance_velocity.north:.2f}, '
+                f'{avoidance_velocity.up:.2f}), '
+                f'final_velocity_enu={velocity_text}'
             )
 
     def control_loop(self):
