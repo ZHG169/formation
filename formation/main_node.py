@@ -462,11 +462,27 @@ class MissionNode(Node):
             self.process_formation_command(now_ns)
 
         if self.mission_manager.state == MissionState.FORMATION:
+            flight_state_failure = (
+                self.required_flight_state_failure(states)
+            )
+            if flight_state_failure:
+                reason = (
+                    'Required flight state failure: '
+                    f'{flight_state_failure}'
+                )
+                if self.mission_manager.request_fault_landing(
+                    reason
+                ):
+                    self.get_logger().error(
+                        reason + '; landing all UAVs'
+                    )
+
             leader_check = self.leader_manager.check_leader(
                 states=states,
                 now_ns=now_ns,
                 require_armed=True,
                 require_offboard=True,
+                require_preflight=False,
             )
 
             if leader_check.healthy:
@@ -631,6 +647,22 @@ class MissionNode(Node):
         self.maybe_log_takeoff_diagnostics(now_ns)
 
 
+    def required_flight_state_failure(self, states):
+        failures = []
+
+        for vehicle_id, state in sorted(states.items()):
+            if not state.status_received:
+                failures.append(f'MAV{vehicle_id}:status_missing')
+                continue
+
+            if not state.armed:
+                failures.append(f'MAV{vehicle_id}:not_armed')
+
+            if not state.offboard_enabled:
+                failures.append(f'MAV{vehicle_id}:offboard_inactive')
+
+        return '; '.join(failures)
+
     def maybe_log_takeoff_diagnostics(self, now_ns):
         if self.mission_manager.state not in {
             MissionState.WAITING_READY,
@@ -672,6 +704,7 @@ class MissionNode(Node):
         for vehicle_id, vehicle in sorted(self.vehicles.items()):
             state = vehicle.get_state()
             reason_text = vehicle.diagnostic_reason_text()
+            advisory_text = vehicle.advisory_reason_text()
 
             lines.extend([
                 f'MAV{vehicle_id}:',
@@ -688,6 +721,7 @@ class MissionNode(Node):
                 f'  health_report_received: '
                 f'{state.health_report_received}',
                 f'  diagnostic: {reason_text}',
+                f'  advisory: {advisory_text}',
             ])
 
             if state.command_ack_received:
@@ -983,6 +1017,10 @@ class MissionNode(Node):
             require_offboard=(
                 self.mission_manager.state
                 == MissionState.FORMATION
+            ),
+            require_preflight=(
+                self.mission_manager.state
+                != MissionState.FORMATION
             ),
         )
 

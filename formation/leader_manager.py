@@ -59,6 +59,7 @@ class LeaderManager:
         now_ns,
         require_armed=False,
         require_offboard=False,
+        require_preflight=True,
     ):
         state = states.get(vehicle_id)
 
@@ -68,7 +69,7 @@ class LeaderManager:
         if not state.status_received:
             return VehicleHealth(False, 'status_missing')
 
-        if not state.preflight_ok:
+        if require_preflight and not state.preflight_ok:
             reason = getattr(state, 'preflight_reason', '')
             if not reason:
                 health_error_flags = getattr(
@@ -153,6 +154,7 @@ class LeaderManager:
         now_ns,
         require_armed=False,
         require_offboard=False,
+        require_preflight=True,
     ):
         return self.evaluate_vehicle(
             self.leader_id,
@@ -160,6 +162,7 @@ class LeaderManager:
             now_ns,
             require_armed=require_armed,
             require_offboard=require_offboard,
+            require_preflight=require_preflight,
         ).healthy
 
     def check_leader(
@@ -168,6 +171,7 @@ class LeaderManager:
         now_ns,
         require_armed=False,
         require_offboard=False,
+        require_preflight=True,
     ):
         health = self.evaluate_vehicle(
             self.leader_id,
@@ -175,6 +179,7 @@ class LeaderManager:
             now_ns,
             require_armed=require_armed,
             require_offboard=require_offboard,
+            require_preflight=require_preflight,
         )
 
         if health.healthy:
@@ -216,6 +221,7 @@ class LeaderManager:
         now_ns,
         require_armed=False,
         require_offboard=False,
+        require_preflight=True,
         exclude_current=True,
     ):
         candidates = []
@@ -230,6 +236,7 @@ class LeaderManager:
                 now_ns,
                 require_armed=require_armed,
                 require_offboard=require_offboard,
+                require_preflight=require_preflight,
             )
 
             if health.healthy:

@@ -64,6 +64,7 @@ class VehicleState:
     command_ack_received: bool = False
 
     preflight_reason: str = ''
+    advisory_reason: str = ''
     health_error_flags: int = 0
     arming_check_error_flags: int = 0
 
@@ -239,8 +240,10 @@ class VehicleInterface:
     def failsafe_callback(self, message):
         self.state.failsafe_received = True
 
-        reasons = []
-        checks = (
+        critical_reasons = []
+        advisory_reasons = []
+
+        critical_checks = (
             ('angular_velocity_invalid',
              message.angular_velocity_invalid),
             ('attitude_invalid', message.attitude_invalid),
@@ -250,10 +253,19 @@ class VehicleInterface:
              message.local_position_invalid),
             ('local_velocity_invalid',
              message.local_velocity_invalid),
-            ('global_position_invalid',
-             message.global_position_invalid),
             ('offboard_signal_lost',
              message.offboard_control_signal_lost),
+            ('geofence_breached', message.geofence_breached),
+            ('mission_failure', message.mission_failure),
+            ('failure_detector_critical',
+             message.fd_critical_failure),
+            ('esc_arming_failure',
+             message.fd_esc_arming_failure),
+            ('motor_failure', message.fd_motor_failure),
+        )
+        advisory_checks = (
+            ('global_position_invalid',
+             message.global_position_invalid),
             ('home_position_invalid',
              message.home_position_invalid),
             ('manual_control_lost',
@@ -263,27 +275,24 @@ class VehicleInterface:
             ('battery_low_remaining_time',
              message.battery_low_remaining_time),
             ('battery_unhealthy', message.battery_unhealthy),
-            ('geofence_breached', message.geofence_breached),
-            ('mission_failure', message.mission_failure),
             ('wind_limit_exceeded', message.wind_limit_exceeded),
             ('flight_time_limit_exceeded',
              message.flight_time_limit_exceeded),
             ('position_accuracy_low',
              message.position_accuracy_low),
             ('navigator_failure', message.navigator_failure),
-            ('failure_detector_critical',
-             message.fd_critical_failure),
-            ('esc_arming_failure',
-             message.fd_esc_arming_failure),
             ('imbalanced_prop', message.fd_imbalanced_prop),
-            ('motor_failure', message.fd_motor_failure),
         )
 
-        for name, active in checks:
+        for name, active in critical_checks:
             if bool(active):
-                reasons.append(name)
+                critical_reasons.append(name)
+        for name, active in advisory_checks:
+            if bool(active):
+                advisory_reasons.append(name)
 
-        self.state.preflight_reason = ','.join(reasons)
+        self.state.preflight_reason = ','.join(critical_reasons)
+        self.state.advisory_reason = ','.join(advisory_reasons)
 
     def health_report_callback(self, message):
         self.state.health_report_received = True
@@ -650,6 +659,12 @@ class VehicleInterface:
             return 'OK'
 
         return ','.join(reasons)
+
+    def advisory_reason_text(self):
+        if not self.state.advisory_reason:
+            return 'OK'
+
+        return self.state.advisory_reason
 
     def timestamp_us(self):
         return self.node.get_clock().now().nanoseconds // 1000 # 取得時間 單位為微秒
