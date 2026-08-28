@@ -52,7 +52,7 @@ mission_node:
 
     minimum_vehicle_distance: 0.8
     maximum_altitude: 20.0
-    maximum_speed: 3.0
+    maximum_speed: 0.5
     geofence_radius: 50.0
     maximum_setpoint_jump: 6.0
     formation_position_tolerance: 0.2

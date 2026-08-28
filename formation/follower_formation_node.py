@@ -6,7 +6,12 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 from formation.coordinate_convert import VectorENU
-from formation.cpf_avoidance import CpfConfig, apply_cpf_to_setpoints
+from formation.cpf_avoidance import (
+    CpfConfig,
+    apply_cpf_to_setpoints,
+    limit_vector,
+    scale_vector,
+)
 from formation.formation_controller import (
     add_vectors,
     rotate_offset,
@@ -56,6 +61,10 @@ class FollowerFormationNode(Node):
                     0.0, 2.0, 0.0,
                 ]),
                 ('slot_assignment_lock', True),
+                ('tracking_kp', 0.6),
+                ('tracking_max_speed', 0.5),
+                ('tracking_deadband', 0.03),
+                ('leader_velocity_feedforward', False),
                 ('cpf_enabled', True),
                 ('cpf_attraction_gain', 0.5),
                 ('cpf_repulsion_gain', 1.2),
@@ -154,6 +163,20 @@ class FollowerFormationNode(Node):
         )
         self.slot_assignment_lock = bool(
             self.get_parameter('slot_assignment_lock').value
+        )
+        self.tracking_kp = float(
+            self.get_parameter('tracking_kp').value
+        )
+        self.tracking_max_speed = float(
+            self.get_parameter('tracking_max_speed').value
+        )
+        self.tracking_deadband = float(
+            self.get_parameter('tracking_deadband').value
+        )
+        self.leader_velocity_feedforward = bool(
+            self.get_parameter(
+                'leader_velocity_feedforward'
+            ).value
         )
         self.slot_offsets = None
         self.last_leader_generation = self.leader_generation
@@ -462,6 +485,45 @@ class FollowerFormationNode(Node):
             )
         )
 
+    def calculate_tracking_velocity(
+        self,
+        current_world,
+        target_world,
+        leader_velocity,
+    ):
+        position_error = subtract_vectors(
+            target_world,
+            current_world,
+        )
+        horizontal_error = math.hypot(
+            position_error.east,
+            position_error.north,
+        )
+        vertical_error = abs(position_error.up)
+
+        if (
+            horizontal_error <= self.tracking_deadband
+            and vertical_error <= self.tracking_deadband
+        ):
+            p_velocity = VectorENU(0.0, 0.0, 0.0)
+        else:
+            p_velocity = scale_vector(
+                position_error,
+                self.tracking_kp,
+            )
+            p_velocity = limit_vector(
+                p_velocity,
+                self.tracking_max_speed,
+            )
+
+        if not self.leader_velocity_feedforward:
+            return p_velocity
+
+        return limit_vector(
+            add_vectors(leader_velocity, p_velocity),
+            self.tracking_max_speed,
+        )
+
     def calculate_follower_setpoints(self, states):
         if self.slot_offsets is None:
             self.lock_current_offsets(states)
@@ -480,6 +542,11 @@ class FollowerFormationNode(Node):
         anchor_world = subtract_vectors(
             leader_world,
             leader_offset,
+        )
+        leader_velocity = (
+            leader_state.velocity_local_enu
+            if leader_state.velocity_local_enu is not None
+            else VectorENU(0.0, 0.0, 0.0)
         )
 
         setpoints = {}
@@ -501,15 +568,21 @@ class FollowerFormationNode(Node):
                 target_world,
                 self.vehicle_origins[vehicle_id],
             )
-            setpoints[vehicle_id] = VehicleSetpoint(
-                position_local_enu=target_local,
-                yaw_local_enu=state.yaw_local_enu,
-            )
-
             current_world = add_vectors(
                 self.vehicle_origins[vehicle_id],
                 state.position_local_enu,
             )
+            tracking_velocity = self.calculate_tracking_velocity(
+                current_world=current_world,
+                target_world=target_world,
+                leader_velocity=leader_velocity,
+            )
+            setpoints[vehicle_id] = VehicleSetpoint(
+                position_local_enu=target_local,
+                yaw_local_enu=state.yaw_local_enu,
+                velocity_local_enu=tracking_velocity,
+            )
+
             target_debug_rows.append({
                 'vehicle_id': vehicle_id,
                 'leader_world': leader_world,
@@ -519,6 +592,8 @@ class FollowerFormationNode(Node):
                 'current_world': current_world,
                 'target_world': target_world,
                 'target_local': target_local,
+                'leader_velocity': leader_velocity,
+                'tracking_velocity': tracking_velocity,
             })
             maximum_error = max(
                 maximum_error,
@@ -579,6 +654,8 @@ class FollowerFormationNode(Node):
             current = row['current_world']
             target_world = row['target_world']
             target_local = row['target_local']
+            leader_velocity = row['leader_velocity']
+            tracking_velocity = row['tracking_velocity']
 
             self.get_logger().info(
                 f'Follower target debug MAV{vehicle_id}: '
@@ -594,6 +671,12 @@ class FollowerFormationNode(Node):
                 f'{target_world.north:.2f}, {target_world.up:.2f}), '
                 f'target_local_enu=({target_local.east:.2f}, '
                 f'{target_local.north:.2f}, {target_local.up:.2f}), '
+                f'leader_velocity_enu=({leader_velocity.east:.2f}, '
+                f'{leader_velocity.north:.2f}, '
+                f'{leader_velocity.up:.2f}), '
+                f'tracking_velocity_enu=({tracking_velocity.east:.2f}, '
+                f'{tracking_velocity.north:.2f}, '
+                f'{tracking_velocity.up:.2f}), '
                 f'cpf_velocity_enu={velocity_text}'
             )
 

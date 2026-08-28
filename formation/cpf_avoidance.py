@@ -252,8 +252,25 @@ def apply_cpf_to_setpoints(
             config,
         )
 
+        # If the nominal setpoint already provides a velocity,
+        # treat it as the upstream tracking controller output. In that
+        # case CPF only adds repulsion, otherwise CPF keeps the legacy
+        # attraction + repulsion behavior for position-only setpoints.
+        feed_forward_velocity = (
+            nominal_setpoint.velocity_local_enu
+            if nominal_setpoint.velocity_local_enu is not None
+            else ZERO_VECTOR
+        )
+        if nominal_setpoint.velocity_local_enu is not None:
+            correction_velocity = repulsion
+        else:
+            correction_velocity = add_vectors(
+                attraction,
+                repulsion,
+            )
+
         velocity = limit_vector(
-            add_vectors(attraction, repulsion),
+            add_vectors(feed_forward_velocity, correction_velocity),
             config.max_speed,
         )
         velocity = limit_velocity_near_fence(
