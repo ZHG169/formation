@@ -3,7 +3,11 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 from formation.coordinate_convert import VectorENU
-from formation.fence_limiter import FenceConfig, limit_velocity_near_fence
+from formation.fence_limiter import (
+    FenceConfig,
+    clamp_position_to_fence,
+    limit_velocity_near_fence,
+)
 from formation.msg import FormationCommand, FormationStatus
 from formation.mission_manager import MissionState
 from formation.vehicle_interface import VehicleInterface, VehicleSetpoint
@@ -34,6 +38,7 @@ class LeaderControlNode(Node):
                 ('target_debug_enabled', False),
                 ('target_debug_interval', 1.0),
                 ('cpf_max_speed', 0.6),
+                ('formation_envelope_enabled', True),
                 ('fence_enabled', False),
                 ('fence_world_x_min', -50.0),
                 ('fence_world_x_max', 50.0),
@@ -82,6 +87,14 @@ class LeaderControlNode(Node):
         self.last_command_receive_ns = 0
         self.command_timeout = float(
             self.get_parameter('command_timeout').value
+        )
+        self.active_move_sequence = None
+        self.move_start_ns = 0
+        self.move_duration = 0.0
+        self.hold_position_local_enu = None
+        self.formation_offsets = None
+        self.formation_envelope_enabled = bool(
+            self.get_parameter('formation_envelope_enabled').value
         )
         self.hold_yaw_enu = 0.0
         self.last_target_debug_ns = 0
@@ -152,6 +165,11 @@ class LeaderControlNode(Node):
         if leader_changed:
             self.latest_command = None
             self.last_command_receive_ns = 0
+            self.active_move_sequence = None
+            self.move_start_ns = 0
+            self.move_duration = 0.0
+            self.hold_position_local_enu = None
+            self.formation_offsets = None
 
     def command_callback(self, message):
         if int(message.leader_id) != self.active_leader_id:
@@ -178,6 +196,160 @@ class LeaderControlNode(Node):
             now_ns - self.last_command_receive_ns
         ) / 1e9
         return 0.0 <= age_seconds <= self.command_timeout
+
+    def command_sequence(self, command):
+        return int(getattr(command, 'sequence', 0))
+
+    def start_move_if_needed(self, command, now_ns):
+        sequence = self.command_sequence(command)
+        if self.active_move_sequence == sequence:
+            return
+
+        self.active_move_sequence = sequence
+        self.move_start_ns = now_ns
+        self.move_duration = max(float(command.duration), 0.0)
+        self.hold_position_local_enu = None
+
+        self.get_logger().info(
+            f'Leader MOVE sequence {sequence} started for '
+            f'{self.move_duration:.2f} s'
+        )
+
+    def move_is_active(self, now_ns):
+        if self.active_move_sequence is None:
+            return False
+
+        elapsed = (now_ns - self.move_start_ns) / 1e9
+        return 0.0 <= elapsed <= self.move_duration
+
+    def lock_hold_position_if_needed(self, state):
+        if self.hold_position_local_enu is not None:
+            return
+
+        self.lock_formation_offsets_if_needed()
+        self.hold_position_local_enu = self.clamp_position_to_formation_envelope(
+            state.position_local_enu,
+        )
+        hold = self.hold_position_local_enu
+        self.get_logger().info(
+            f'Leader hold position locked at '
+            f'({hold.east:.2f}, {hold.north:.2f}, {hold.up:.2f}) '
+            'local ENU'
+        )
+
+    def subtract_vectors(self, first, second):
+        return VectorENU(
+            east=first.east - second.east,
+            north=first.north - second.north,
+            up=first.up - second.up,
+        )
+
+    def lock_formation_offsets_if_needed(self):
+        if not self.formation_envelope_enabled:
+            return
+        if self.formation_offsets is not None:
+            return
+
+        positions = {}
+        for vehicle_id, vehicle in self.vehicles.items():
+            state = vehicle.get_state()
+            if not state.position_valid:
+                return
+            if state.position_local_enu is None:
+                return
+            positions[vehicle_id] = state.position_local_enu
+
+        if self.active_leader_id not in positions:
+            return
+
+        leader_position = positions[self.active_leader_id]
+        self.formation_offsets = {
+            vehicle_id: self.subtract_vectors(
+                position,
+                leader_position,
+            )
+            for vehicle_id, position in positions.items()
+        }
+
+        log_message = (
+            'Leader formation envelope locked from current offsets: '
+            + ', '.join(
+                f'MAV{vehicle_id}=({offset.east:.2f}, '
+                f'{offset.north:.2f}, {offset.up:.2f})'
+                for vehicle_id, offset
+                in sorted(self.formation_offsets.items())
+            )
+        )
+
+        if self.fence_config.enabled:
+            envelope = self.formation_envelope_config()
+            log_message += (
+                ' | leader safe range: '
+                f'x=[{envelope.world_x_min:.2f}, '
+                f'{envelope.world_x_max:.2f}], '
+                f'y=[{envelope.world_y_min:.2f}, '
+                f'{envelope.world_y_max:.2f}]'
+            )
+
+        self.get_logger().info(log_message)
+
+    def formation_envelope_config(self):
+        if (
+            not self.formation_envelope_enabled
+            or not self.fence_config.enabled
+            or self.formation_offsets is None
+        ):
+            return self.fence_config
+
+        min_offset_east = min(
+            offset.east for offset in self.formation_offsets.values()
+        )
+        max_offset_east = max(
+            offset.east for offset in self.formation_offsets.values()
+        )
+        min_offset_north = min(
+            offset.north for offset in self.formation_offsets.values()
+        )
+        max_offset_north = max(
+            offset.north for offset in self.formation_offsets.values()
+        )
+
+        leader_x_min = self.fence_config.world_x_min - min_offset_east
+        leader_x_max = self.fence_config.world_x_max - max_offset_east
+        leader_y_min = self.fence_config.world_y_min - min_offset_north
+        leader_y_max = self.fence_config.world_y_max - max_offset_north
+
+        if leader_x_min > leader_x_max or leader_y_min > leader_y_max:
+            self.get_logger().error(
+                'Formation is larger than the configured fence; '
+                'falling back to leader-only fence limit'
+            )
+            return self.fence_config
+
+        return FenceConfig(
+            enabled=True,
+            world_x_min=leader_x_min,
+            world_x_max=leader_x_max,
+            world_y_min=leader_y_min,
+            world_y_max=leader_y_max,
+            height_min=self.fence_config.height_min,
+            height_max=self.fence_config.height_max,
+            brake_distance_m=self.fence_config.brake_distance_m,
+            max_speed=self.fence_config.max_speed,
+        )
+
+    def clamp_position_to_formation_envelope(self, position):
+        return clamp_position_to_fence(
+            position,
+            self.formation_envelope_config(),
+        )
+
+    def limit_velocity_by_formation_envelope(self, current, velocity):
+        return limit_velocity_near_fence(
+            current,
+            velocity,
+            self.formation_envelope_config(),
+        )
 
     def log_leader_target_debug(self, state, velocity, command, now_ns):
         enabled = bool(
@@ -231,22 +403,29 @@ class LeaderControlNode(Node):
         )
 
         use_velocity = False
+        self.lock_hold_position_if_needed(state)
         setpoint = VehicleSetpoint(
-            position_local_enu=state.position_local_enu,
+            position_local_enu=self.hold_position_local_enu,
             yaw_local_enu=state.yaw_local_enu,
         )
 
         if command is not None:
             if command.command == FormationCommand.MOVE:
+                self.start_move_if_needed(command, now_ns)
                 velocity = VectorENU(
                     east=float(command.velocity_east),
                     north=float(command.velocity_north),
                     up=float(command.velocity_up),
                 )
+                self.lock_formation_offsets_if_needed()
                 velocity = limit_velocity_near_fence(
                     state.position_local_enu,
                     velocity,
                     self.fence_config,
+                )
+                velocity = self.limit_velocity_by_formation_envelope(
+                    state.position_local_enu,
+                    velocity,
                 )
                 self.log_leader_target_debug(
                     state,
@@ -254,16 +433,24 @@ class LeaderControlNode(Node):
                     command,
                     now_ns,
                 )
-                setpoint = VehicleSetpoint(
-                    position_local_enu=state.position_local_enu,
-                    yaw_local_enu=state.yaw_local_enu,
-                    velocity_local_enu=velocity,
-                )
-                use_velocity = True
+                if self.move_is_active(now_ns):
+                    setpoint = VehicleSetpoint(
+                        position_local_enu=state.position_local_enu,
+                        yaw_local_enu=state.yaw_local_enu,
+                        velocity_local_enu=velocity,
+                    )
+                    use_velocity = True
+                else:
+                    self.lock_hold_position_if_needed(state)
+                    setpoint = VehicleSetpoint(
+                        position_local_enu=self.hold_position_local_enu,
+                        yaw_local_enu=state.yaw_local_enu,
+                    )
             elif command.command == FormationCommand.SET_YAW:
                 self.hold_yaw_enu = float(command.yaw_enu)
+                self.lock_hold_position_if_needed(state)
                 setpoint = VehicleSetpoint(
-                    position_local_enu=state.position_local_enu,
+                    position_local_enu=self.hold_position_local_enu,
                     yaw_local_enu=self.hold_yaw_enu,
                 )
 

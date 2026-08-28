@@ -9,6 +9,8 @@ leader_control_node:
     target_debug_interval: 1.0
     cpf_max_speed: 0.5
 
+    # Limit leader motion so the whole formation stays inside fence.
+    formation_envelope_enabled: true
 
     # Rectangular world fence in ROS ENU frame.
     fence_enabled: true
