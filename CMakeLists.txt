@@ -35,7 +35,7 @@ install(
     scripts/mission_node
     scripts/leader_command_node
     scripts/leader_control_node
-    scripts/follower_formation_node
+    scripts/follower_control_node
     scripts/distributed_vehicle_node
     scripts/monitor_mav_dds.sh
   DESTINATION lib/${PROJECT_NAME}
@@ -45,6 +45,7 @@ install(
   DIRECTORY
     launch
     config
+    worlds
   DESTINATION share/${PROJECT_NAME}
 )
 

@@ -27,10 +27,10 @@ def generate_launch_description():
         'config',
         'leader_control.yaml',
     )
-    default_follower_formation_config = os.path.join(
+    default_follower_control_config = os.path.join(
         package_share,
         'config',
-        'follower_formation.yaml',
+        'follower_control.yaml',
     )
 
     control_mode = LaunchConfiguration('control_mode')
@@ -41,8 +41,8 @@ def generate_launch_description():
     leader_control_config = LaunchConfiguration(
         'leader_control_config'
     )
-    follower_formation_config = LaunchConfiguration(
-        'follower_formation_config'
+    follower_control_config = LaunchConfiguration(
+        'follower_control_config'
     )
 
     mission_node = Node(
@@ -75,19 +75,19 @@ def generate_launch_description():
         parameters=[leader_control_config],
     )
 
-    follower_formation_node = Node(
+    follower_control_node = Node(
         package='formation',
-        executable='follower_formation_node',
-        name='follower_formation_node',
+        executable='follower_control_node',
+        name='follower_control_node',
         output='screen',
         emulate_tty=True,
-        parameters=[follower_formation_config],
+        parameters=[follower_control_config],
     )
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'control_mode',
-            default_value='leader_follower',
+            default_value='centralized',
             description=(
                 'leader_follower is the normal split-node mode. '
                 'centralized/distributed are legacy modes.'
@@ -109,14 +109,14 @@ def generate_launch_description():
             description='Leader control node parameter YAML file.',
         ),
         DeclareLaunchArgument(
-            'follower_formation_config',
-            default_value=default_follower_formation_config,
+            'follower_control_config',
+            default_value=default_follower_control_config,
             description=(
-                'Follower formation node parameter YAML file.'
+                'Follower control node parameter YAML file.'
             ),
         ),
         mission_node,
         leader_command_node,
         leader_control_node,
-        follower_formation_node,
+        follower_control_node,
     ])

@@ -1,4 +1,4 @@
-follower_formation_node:
+follower_control_node:
   ros__parameters:
     control_frequency: 50.0
     leader_id: 1

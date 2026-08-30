@@ -6,7 +6,7 @@
 # - mission.yaml
 # - leader_command.yaml
 # - leader_control.yaml
-# - follower_formation.yaml
+# - follower_control.yaml
 # - distributed.yaml      # legacy distributed-mode parameters
 #
 # Start the normal leader/follower stack with:

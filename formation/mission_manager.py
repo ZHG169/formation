@@ -11,7 +11,12 @@ class MissionState(Enum):
     WAITING_READY = auto()
     OFFBOARD_WARMUP = auto()
     TAKEOFF = auto()
+    HOVER_STABILIZE = auto()
+    SNAPSHOT_FORMATION = auto()
     WAITING_LEADER_COMMAND = auto()
+    LEADER_REPOSITION = auto()
+    FOLLOWERS_APPROACH = auto()
+    FORMATION_HOLD = auto()
     FORMATION = auto()
     LANDING = auto()
     LANDED = auto()
@@ -43,6 +48,8 @@ class MissionManager:
         land_command_interval=1.0,
         liftoff_after_arm_timeout=10.0,
         takeoff_climb_rate=0.25,
+        hover_stabilize_duration=1.0,
+        leader_stabilize_duration=1.0,
     ):
         self.state = MissionState.IDLE
 
@@ -58,9 +65,16 @@ class MissionManager:
             liftoff_after_arm_timeout
         )
         self.takeoff_climb_rate = float(takeoff_climb_rate)
+        self.hover_stabilize_duration = float(
+            hover_stabilize_duration
+        )
+        self.leader_stabilize_duration = float(
+            leader_stabilize_duration
+        )
 
         self.ready_since_ns = None
         self.warmup_start_ns = None
+        self.hover_start_ns = None
         self.takeoff_setpoints = {}
         self.takeoff_home_setpoints = {}
         self.takeoff_target_setpoints = {}
@@ -70,6 +84,9 @@ class MissionManager:
         self.land_command_pending = False
         self.last_land_command_ns = None
         self.fault_reason = ''
+        self.active_move_sequence = None
+        self.leader_move_start_ns = 0
+        self.leader_move_duration = 0.0
 
     def request_takeoff(self):
         if self.state not in {
@@ -81,6 +98,7 @@ class MissionManager:
         self.state = MissionState.WAITING_READY
         self.ready_since_ns = None
         self.warmup_start_ns = None
+        self.hover_start_ns = None
         self.takeoff_setpoints = {}
         self.takeoff_home_setpoints = {}
         self.takeoff_target_setpoints = {}
@@ -90,12 +108,20 @@ class MissionManager:
         self.land_command_pending = False
         self.last_land_command_ns = None
         self.fault_reason = ''
+        self.active_move_sequence = None
+        self.leader_move_start_ns = 0
+        self.leader_move_duration = 0.0
         return True
 
     def request_land(self):
         if self.state not in {
             MissionState.TAKEOFF,
+            MissionState.HOVER_STABILIZE,
+            MissionState.SNAPSHOT_FORMATION,
             MissionState.WAITING_LEADER_COMMAND,
+            MissionState.LEADER_REPOSITION,
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
             MissionState.FORMATION,
         }:
             return False
@@ -108,7 +134,12 @@ class MissionManager:
     def request_fault_landing(self, reason):
         if self.state not in {
             MissionState.TAKEOFF,
+            MissionState.HOVER_STABILIZE,
+            MissionState.SNAPSHOT_FORMATION,
             MissionState.WAITING_LEADER_COMMAND,
+            MissionState.LEADER_REPOSITION,
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
             MissionState.FORMATION,
         }:
             return False
@@ -134,7 +165,12 @@ class MissionManager:
         return self.state in {
             MissionState.OFFBOARD_WARMUP,
             MissionState.TAKEOFF,
+            MissionState.HOVER_STABILIZE,
+            MissionState.SNAPSHOT_FORMATION,
             MissionState.WAITING_LEADER_COMMAND,
+            MissionState.LEADER_REPOSITION,
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
             MissionState.FORMATION,
         }
 
@@ -147,6 +183,56 @@ class MissionManager:
 
         self.state = MissionState.FORMATION
         return True
+
+    def complete_snapshot(self):
+        if self.state != MissionState.SNAPSHOT_FORMATION:
+            return False
+
+        self.state = MissionState.WAITING_LEADER_COMMAND
+        return True
+
+    def request_leader_reposition(
+        self,
+        sequence,
+        duration,
+        now_ns,
+    ):
+        if self.state not in {
+            MissionState.WAITING_LEADER_COMMAND,
+            MissionState.FORMATION_HOLD,
+        }:
+            return False
+
+        self.active_move_sequence = int(sequence)
+        self.leader_move_start_ns = now_ns
+        self.leader_move_duration = max(float(duration), 0.0)
+        self.state = MissionState.LEADER_REPOSITION
+        return True
+
+    def request_followers_approach(self):
+        if self.state != MissionState.LEADER_REPOSITION:
+            return False
+
+        self.state = MissionState.FOLLOWERS_APPROACH
+        return True
+
+    def request_formation_hold(self):
+        if self.state != MissionState.FOLLOWERS_APPROACH:
+            return False
+
+        self.state = MissionState.FORMATION_HOLD
+        return True
+
+    def leader_reposition_done(self, now_ns):
+        if self.state != MissionState.LEADER_REPOSITION:
+            return False
+
+        elapsed = (now_ns - self.leader_move_start_ns) / 1e9
+        return (
+            elapsed
+            >= self.leader_move_duration
+            + self.leader_stabilize_duration
+        )
 
     def _state_is_ready(self, state, now_ns):
         if not (
@@ -364,8 +450,31 @@ class MissionManager:
                 self.takeoff_setpoints = dict(
                     self.takeoff_target_setpoints
                 )
-                self.state = MissionState.WAITING_LEADER_COMMAND
+                self.hover_start_ns = now_ns
+                self.state = MissionState.HOVER_STABILIZE
 
+            return output
+
+        if self.state == MissionState.HOVER_STABILIZE:
+            output.publish_offboard = True
+            output.setpoints = dict(self.takeoff_target_setpoints)
+
+            if not self._all_at_takeoff_height(states):
+                self.hover_start_ns = now_ns
+                return output
+
+            hover_elapsed = (
+                now_ns - self.hover_start_ns
+            ) / 1e9
+
+            if hover_elapsed >= self.hover_stabilize_duration:
+                self.state = MissionState.SNAPSHOT_FORMATION
+
+            return output
+
+        if self.state == MissionState.SNAPSHOT_FORMATION:
+            output.publish_offboard = True
+            output.setpoints = dict(self.takeoff_target_setpoints)
             return output
 
         if self.state == MissionState.WAITING_LEADER_COMMAND:
@@ -373,7 +482,12 @@ class MissionManager:
             output.setpoints = dict(self.takeoff_target_setpoints)
             return output
 
-        if self.state == MissionState.FORMATION:
+        if self.state in {
+            MissionState.LEADER_REPOSITION,
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
+            MissionState.FORMATION,
+        }:
             # FORMATION setpoints are owned by dedicated control nodes.
             # mission_node remains the state owner and keeps landing /
             # emergency authority, but it does not publish formation

@@ -24,7 +24,7 @@ from formation.formation_controller import (
     subtract_vectors,
     vector_distance,
 )
-from formation.msg import FormationStatus
+from formation.msg import FormationCommand, FormationStatus
 from formation.mission_manager import MissionState
 from formation.vehicle_interface import VehicleInterface, VehicleSetpoint
 
@@ -32,8 +32,8 @@ from formation.vehicle_interface import VehicleInterface, VehicleSetpoint
 CONTROL_MODE_LEADER_FOLLOWER = 'leader_follower'
 
 
-class FollowerFormationNode(Node):
-    """Leader-relative follower formation controller.
+class FollowerControlNode(Node):
+    """Leader-relative follower control node.
 
     This node owns only follower heartbeat/setpoints during FORMATION.
     The leader is treated as the anchor source and is controlled by
@@ -41,7 +41,7 @@ class FollowerFormationNode(Node):
     """
 
     def __init__(self):
-        super().__init__('follower_formation_node')
+        super().__init__('follower_control_node')
 
         self.declare_parameters(
             namespace='',
@@ -186,6 +186,10 @@ class FollowerFormationNode(Node):
         )
         self.slot_offsets = None
         self.last_leader_generation = self.leader_generation
+        self.latest_command = None
+        self.last_command_receive_ns = 0
+        self.leader_move_seen = False
+        self.formation_phase = 'idle'
 
         self.cpf_config = CpfConfig(
             enabled=bool(
@@ -254,6 +258,12 @@ class FollowerFormationNode(Node):
             self.status_callback,
             10,
         )
+        self.command_subscription = self.create_subscription(
+            FormationCommand,
+            '/formation/command',
+            self.command_callback,
+            10,
+        )
         self.timer = self.create_timer(
             self.control_period,
             self.control_loop,
@@ -264,7 +274,7 @@ class FollowerFormationNode(Node):
         )
 
         self.get_logger().info(
-            f'Follower formation node ready at {frequency:.1f} Hz'
+            f'Follower control node ready at {frequency:.1f} Hz'
         )
 
     def status_callback(self, message):
@@ -293,6 +303,10 @@ class FollowerFormationNode(Node):
         if leader_changed or formation_changed:
             self.slot_offsets = None
             self.last_leader_generation = self.leader_generation
+            self.latest_command = None
+            self.last_command_receive_ns = 0
+            self.leader_move_seen = False
+            self.formation_phase = 'idle'
             self.formation_ready_since_ns = None
             self.last_formation_ready = False
 
@@ -308,6 +322,55 @@ class FollowerFormationNode(Node):
             self.mission_state == MissionState.FORMATION.name
             and self.control_mode == CONTROL_MODE_LEADER_FOLLOWER
         )
+
+    def command_callback(self, message):
+        if int(message.leader_id) != self.active_leader_id:
+            return
+        if int(message.leader_generation) != self.leader_generation:
+            return
+
+        self.latest_command = message
+        self.last_command_receive_ns = (
+            self.get_clock().now().nanoseconds
+        )
+
+    def command_is_fresh(self, now_ns):
+        if self.latest_command is None:
+            return False
+
+        age_seconds = (
+            now_ns - self.last_command_receive_ns
+        ) / 1e9
+        return 0.0 <= age_seconds <= self.local_position_timeout
+
+    def leader_is_moving(self, now_ns):
+        if not self.command_is_fresh(now_ns):
+            return False
+
+        return bool(
+            self.latest_command.command == FormationCommand.MOVE
+        )
+
+    def publish_follower_hold_setpoints(self, states):
+        zero_velocity = VectorENU(0.0, 0.0, 0.0)
+
+        for vehicle_id, state in states.items():
+            if vehicle_id == self.active_leader_id:
+                continue
+            if not state.position_valid:
+                continue
+            if state.position_local_enu is None:
+                continue
+
+            vehicle = self.vehicles[vehicle_id]
+            vehicle.publish_offboard_heartbeat(use_velocity=True)
+            vehicle.publish_setpoint(
+                VehicleSetpoint(
+                    position_local_enu=state.position_local_enu,
+                    yaw_local_enu=state.yaw_local_enu,
+                    velocity_local_enu=zero_velocity,
+                )
+            )
 
     def get_states(self):
         return {
@@ -759,6 +822,40 @@ class FollowerFormationNode(Node):
         if not self.valid_states(states):
             return
 
+        if self.slot_offsets is None:
+            self.lock_current_offsets(states)
+
+        now_ns = self.get_clock().now().nanoseconds
+        if self.leader_is_moving(now_ns):
+            self.leader_move_seen = True
+            if self.formation_phase != 'leader_moving':
+                self.formation_phase = 'leader_moving'
+                self.get_logger().info(
+                    'Formation phase: leader moving; '
+                    'followers holding initial positions'
+                )
+            self.publish_follower_hold_setpoints(states)
+            return
+
+        if not self.leader_move_seen:
+            if self.formation_phase != 'waiting_leader_move':
+                self.formation_phase = 'waiting_leader_move'
+                self.get_logger().info(
+                    'Formation phase: waiting for first leader MOVE; '
+                    'followers holding initial positions'
+                )
+            self.publish_follower_hold_setpoints(states)
+            return
+
+        if self.formation_phase != 'tracking':
+            self.formation_phase = 'tracking'
+            self.formation_ready_since_ns = None
+            self.last_formation_ready = False
+            self.get_logger().info(
+                'Formation phase: leader move complete; '
+                'followers tracking locked offsets'
+            )
+
         setpoints = self.calculate_follower_setpoints(states)
 
         for vehicle_id, setpoint in setpoints.items():
@@ -802,6 +899,7 @@ class FollowerFormationNode(Node):
 
         stable_now = bool(
             self.formation_active()
+            and self.formation_phase == 'tracking'
             and self.slot_offsets is not None
             and self.maximum_position_error
             <= self.formation_position_tolerance
@@ -858,7 +956,7 @@ class FollowerFormationNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = FollowerFormationNode()
+    node = FollowerControlNode()
 
     try:
         rclpy.spin(node)

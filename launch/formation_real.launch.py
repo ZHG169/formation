@@ -23,10 +23,10 @@ def generate_launch_description():
         'config',
         'mission_real.yaml',
     )
-    follower_real_config = os.path.join(
+    follower_control_real_config = os.path.join(
         package_share,
         'config',
-        'follower_formation_real.yaml',
+        'follower_control_real.yaml',
     )
 
     control_mode = LaunchConfiguration('control_mode')
@@ -34,7 +34,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'control_mode',
-            default_value='leader_follower',
+            default_value='centralized',
             description='Real-flight formation control mode.',
         ),
         IncludeLaunchDescription(
@@ -42,7 +42,7 @@ def generate_launch_description():
             launch_arguments={
                 'control_mode': control_mode,
                 'mission_config': mission_real_config,
-                'follower_formation_config': follower_real_config,
+                'follower_control_config': follower_control_real_config,
             }.items(),
         ),
     ])

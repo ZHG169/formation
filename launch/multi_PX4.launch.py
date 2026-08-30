@@ -50,6 +50,9 @@
 #     ])
 
 import os
+import shutil
+
+from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -70,6 +73,32 @@ PX4_BINARY = os.path.join(
     'bin',
     'px4',
 )
+PX4_WORLD_NAME = 'formation_test'
+PX4_WORLD_FILE = os.path.join(
+    PX4_DIR,
+    'Tools',
+    'simulation',
+    'gz',
+    'worlds',
+    f'{PX4_WORLD_NAME}.sdf',
+)
+
+
+def ensure_formation_world():
+    package_share = get_package_share_directory('formation')
+    source_world = os.path.join(
+        package_share,
+        'worlds',
+        f'{PX4_WORLD_NAME}.sdf',
+    )
+
+    if not os.path.isfile(source_world):
+        raise RuntimeError(
+            f'找不到 formation 測試場景：{source_world}'
+        )
+
+    os.makedirs(os.path.dirname(PX4_WORLD_FILE), exist_ok=True)
+    shutil.copyfile(source_world, PX4_WORLD_FILE)
 
 
 def create_px4_instance(
@@ -88,7 +117,7 @@ def create_px4_instance(
         'PX4_SIM_MODEL': 'gz_x500',
 
         # Gazebo world
-        'PX4_GZ_WORLD': 'default',
+        'PX4_GZ_WORLD': PX4_WORLD_NAME,
 
         # Gazebo World ENU 初始位置
         'PX4_GZ_MODEL_POSE': pose,
@@ -149,6 +178,8 @@ def generate_launch_description():
             '請先完成 px4_sitl_default 編譯。'
         )
 
+    ensure_formation_world()
+
     # instance 0
     # MAV_SYS_ID = 1
     # UXRCE_DDS_KEY = 1
@@ -167,7 +198,7 @@ def generate_launch_description():
     mav2 = create_px4_instance(
         instance=1,
         drone_name='MAV2',
-        pose='2,0,0,0,0,0',
+        pose='0,-0.9,0,0,0,0',
         standalone=True,
     )
 
@@ -178,7 +209,7 @@ def generate_launch_description():
     mav3 = create_px4_instance(
         instance=2,
         drone_name='MAV3',
-        pose='0,2,0,0,0,0',
+        pose='0,0.9,0,0,0,0',
         standalone=True,
     )
 

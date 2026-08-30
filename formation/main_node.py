@@ -5,17 +5,30 @@ from std_srvs.srv import Trigger
 
 from formation.msg import FormationCommand, FormationStatus
 from formation.coordinate_convert import VectorENU
-from formation.cpf_avoidance import CpfConfig
+from formation.cpf_avoidance import (
+    CpfConfig,
+    add_vectors as add_cpf_vectors,
+    limit_vector,
+    repulsion_from_neighbors,
+    scale_vector,
+)
+from formation.fence_limiter import (
+    FenceConfig,
+    limit_velocity_near_fence,
+)
 from formation.srv import SetLeader
 from formation.formation_controller import (
     CentralizedFormationController,
     DistributedFormationController,
     FormationReference,
+    add_vectors,
+    subtract_vectors,
+    vector_distance,
 )
 from formation.leader_manager import LeaderManager
 from formation.mission_manager import MissionManager, MissionState
 from formation.safety_manager import SafetyManager
-from formation.vehicle_interface import VehicleInterface
+from formation.vehicle_interface import VehicleInterface, VehicleSetpoint
 
 """
 Mission-layer node for the formation package.
@@ -29,7 +42,7 @@ Next split names:
     leader_control_node
         Future node that owns only the leader setpoint during FORMATION.
 
-    follower_formation_node
+    follower_control_node
         Future node that owns only follower setpoints during FORMATION.
 
     safety_monitor_node
@@ -73,6 +86,8 @@ class MissionNode(Node):
                 ('leader_id', 1),
                 ('takeoff_height', 0.5),
                 ('takeoff_climb_rate', 0.25),
+                ('hover_stabilize_duration', 1.0),
+                ('leader_stabilize_duration', 1.0),
                 ('liftoff_after_arm_timeout', 10.0),
                 ('ready_hold_duration', 2.0),
                 ('offboard_warmup_duration', 2.0),
@@ -101,6 +116,12 @@ class MissionNode(Node):
                 ('fence_brake_distance_m', 0.35),
                 ('near_fence_margin_m', 0.3),
                 ('formation_position_tolerance', 0.5),
+                ('formation_speed_tolerance', 0.15),
+                ('formation_hold_duration', 2.0),
+                ('formation_footprint_margin', 0.1),
+                ('tracking_kp', 0.8),
+                ('tracking_max_speed', 0.5),
+                ('tracking_deadband', 0.03),
                 ('formation_reference_enu', [
                     0.0, 0.0, 3.0,
                 ]),
@@ -154,6 +175,12 @@ class MissionNode(Node):
             ).value,
             takeoff_climb_rate=self.get_parameter(
                 'takeoff_climb_rate'
+            ).value,
+            hover_stabilize_duration=self.get_parameter(
+                'hover_stabilize_duration'
+            ).value,
+            leader_stabilize_duration=self.get_parameter(
+                'leader_stabilize_duration'
             ).value,
         )
 
@@ -245,6 +272,30 @@ class MissionNode(Node):
                 'formation_position_tolerance'
             ).value
         )
+        self.formation_speed_tolerance = float(
+            self.get_parameter(
+                'formation_speed_tolerance'
+            ).value
+        )
+        self.formation_hold_duration = float(
+            self.get_parameter(
+                'formation_hold_duration'
+            ).value
+        )
+        self.formation_footprint_margin = float(
+            self.get_parameter(
+                'formation_footprint_margin'
+            ).value
+        )
+        self.tracking_kp = float(
+            self.get_parameter('tracking_kp').value
+        )
+        self.tracking_max_speed = float(
+            self.get_parameter('tracking_max_speed').value
+        )
+        self.tracking_deadband = float(
+            self.get_parameter('tracking_deadband').value
+        )
 
         mode = self.get_parameter('control_mode').value
         self.control_mode = str(mode)
@@ -264,6 +315,36 @@ class MissionNode(Node):
 
         self.control_period = 1.0 / frequency
 
+
+        self.fence_config = FenceConfig(
+            enabled=bool(
+                self.get_parameter('fence_enabled').value
+            ),
+            world_x_min=float(
+                self.get_parameter('fence_world_x_min').value
+            ),
+            world_x_max=float(
+                self.get_parameter('fence_world_x_max').value
+            ),
+            world_y_min=float(
+                self.get_parameter('fence_world_y_min').value
+            ),
+            world_y_max=float(
+                self.get_parameter('fence_world_y_max').value
+            ),
+            height_min=float(
+                self.get_parameter('fence_height_min').value
+            ),
+            height_max=float(
+                self.get_parameter('fence_height_max').value
+            ),
+            brake_distance_m=float(
+                self.get_parameter('fence_brake_distance_m').value
+            ),
+            max_speed=float(
+                self.get_parameter('cpf_max_speed').value
+            ),
+        )
 
         self.cpf_config = CpfConfig(
             enabled=bool(
@@ -414,9 +495,15 @@ class MissionNode(Node):
             10,
         )
 
-        self.follower_formation_ready = False
+        self.follower_control_ready = False
         self.follower_maximum_position_error = 0.0
         self.formation_complete_reported = False
+        self.centralized_offsets = None
+        self.centralized_active_move_sequence = None
+        self.centralized_active_velocity = VectorENU(0.0, 0.0, 0.0)
+        self.centralized_maximum_position_error = 0.0
+        self.centralized_maximum_speed = 0.0
+        self.centralized_formation_ready_since_ns = None
 
         self.follower_status_subscription = (
             self.create_subscription(
@@ -445,6 +532,358 @@ class MissionNode(Node):
             f'Formation controller ready at {frequency:.1f} Hz'
         )
 
+    def command_sequence(self, command):
+        return int(getattr(command, 'sequence', 0))
+
+    def central_world_positions(self, states):
+        positions = {}
+        for vehicle_id, state in states.items():
+            if vehicle_id not in self.vehicle_origins:
+                continue
+            if not state.position_valid:
+                continue
+            if state.position_local_enu is None:
+                continue
+
+            positions[vehicle_id] = add_vectors(
+                self.vehicle_origins[vehicle_id],
+                state.position_local_enu,
+            )
+
+        return positions
+
+    def capture_centralized_snapshot(self, states):
+        positions = self.central_world_positions(states)
+        leader_id = self.leader_manager.leader_id
+
+        if leader_id not in positions:
+            self.get_logger().warning(
+                'Cannot snapshot formation: leader position unavailable'
+            )
+            return False
+
+        missing = set(self.vehicles) - set(positions)
+        if missing:
+            self.get_logger().warning(
+                'Cannot snapshot formation: missing positions for '
+                + ', '.join(f'MAV{vehicle_id}' for vehicle_id in sorted(missing))
+            )
+            return False
+
+        leader_position = positions[leader_id]
+        self.centralized_offsets = {
+            vehicle_id: subtract_vectors(position, leader_position)
+            for vehicle_id, position in positions.items()
+        }
+        self.centralized_formation_ready_since_ns = None
+        self.formation_complete_reported = False
+
+        self.get_logger().info(
+            'SNAPSHOT_FORMATION locked offsets: '
+            + ', '.join(
+                f'MAV{vehicle_id}=({offset.east:.2f}, '
+                f'{offset.north:.2f}, {offset.up:.2f})'
+                for vehicle_id, offset
+                in sorted(self.centralized_offsets.items())
+            )
+        )
+        return True
+
+    def predicted_leader_target(self, leader_position, command):
+        return VectorENU(
+            east=(
+                leader_position.east
+                + float(command.velocity_east) * float(command.duration)
+            ),
+            north=(
+                leader_position.north
+                + float(command.velocity_north) * float(command.duration)
+            ),
+            up=(
+                leader_position.up
+                + float(command.velocity_up) * float(command.duration)
+            ),
+        )
+
+    def position_inside_fence_with_margin(self, position):
+        if not self.fence_config.enabled:
+            return True, ''
+
+        margin = self.formation_footprint_margin
+        checks = [
+            (
+                position.east >= self.fence_config.world_x_min + margin,
+                f'east {position.east:.2f} < '
+                f'x_min+margin {self.fence_config.world_x_min + margin:.2f}',
+            ),
+            (
+                position.east <= self.fence_config.world_x_max - margin,
+                f'east {position.east:.2f} > '
+                f'x_max-margin {self.fence_config.world_x_max - margin:.2f}',
+            ),
+            (
+                position.north >= self.fence_config.world_y_min + margin,
+                f'north {position.north:.2f} < '
+                f'y_min+margin {self.fence_config.world_y_min + margin:.2f}',
+            ),
+            (
+                position.north <= self.fence_config.world_y_max - margin,
+                f'north {position.north:.2f} > '
+                f'y_max-margin {self.fence_config.world_y_max - margin:.2f}',
+            ),
+            (
+                position.up >= self.fence_config.height_min + margin,
+                f'up {position.up:.2f} < '
+                f'z_min+margin {self.fence_config.height_min + margin:.2f}',
+            ),
+            (
+                position.up <= self.fence_config.height_max - margin,
+                f'up {position.up:.2f} > '
+                f'z_max-margin {self.fence_config.height_max - margin:.2f}',
+            ),
+        ]
+
+        for ok, reason in checks:
+            if not ok:
+                return False, reason
+
+        return True, ''
+
+    def validate_centralized_move_command(self, states, command):
+        if self.centralized_offsets is None:
+            if not self.capture_centralized_snapshot(states):
+                return False
+
+        positions = self.central_world_positions(states)
+        leader_id = self.leader_manager.leader_id
+        if leader_id not in positions:
+            self.get_logger().error(
+                'Rejected leader MOVE: leader position unavailable'
+            )
+            return False
+
+        leader_target = self.predicted_leader_target(
+            positions[leader_id],
+            command,
+        )
+
+        debug_rows = []
+        for vehicle_id, offset in sorted(self.centralized_offsets.items()):
+            target = add_vectors(leader_target, offset)
+            inside, reason = self.position_inside_fence_with_margin(
+                target
+            )
+            debug_rows.append(
+                f'MAV{vehicle_id}=({target.east:.2f}, '
+                f'{target.north:.2f}, {target.up:.2f})'
+            )
+            if not inside:
+                self.get_logger().error(
+                    'Rejected leader MOVE: predicted MAV'
+                    f'{vehicle_id} target ({target.east:.2f}, '
+                    f'{target.north:.2f}, {target.up:.2f}) '
+                    f'outside fence margin: {reason}'
+                )
+                return False
+
+        self.get_logger().info(
+            'Accepted leader MOVE footprint: leader_target='
+            f'({leader_target.east:.2f}, {leader_target.north:.2f}, '
+            f'{leader_target.up:.2f}), predicted_targets: '
+            + ', '.join(debug_rows)
+        )
+        return True
+
+    def active_centralized_command(self, now_ns):
+        if self.latest_command is None:
+            return None
+
+        age_seconds = (now_ns - self.last_command_receive_ns) / 1e9
+        if age_seconds > self.command_timeout:
+            return None
+
+        return self.latest_command
+
+    def central_tracking_velocity(self, current_world, target_world):
+        error = subtract_vectors(target_world, current_world)
+        horizontal_error = (error.east ** 2 + error.north ** 2) ** 0.5
+        vertical_error = abs(error.up)
+
+        if (
+            horizontal_error <= self.tracking_deadband
+            and vertical_error <= self.tracking_deadband
+        ):
+            return VectorENU(0.0, 0.0, 0.0)
+
+        return limit_vector(
+            scale_vector(error, self.tracking_kp),
+            self.tracking_max_speed,
+        )
+
+    def central_cpf_velocity(self, vehicle_id, current_world_positions):
+        if not self.cpf_config.enabled:
+            return VectorENU(0.0, 0.0, 0.0)
+
+        return limit_vector(
+            repulsion_from_neighbors(
+                vehicle_id,
+                current_world_positions,
+                self.cpf_config,
+            ),
+            self.cpf_config.max_speed,
+        )
+
+    def vector_speed(self, vector):
+        return (
+            vector.east ** 2
+            + vector.north ** 2
+            + vector.up ** 2
+        ) ** 0.5
+
+    def make_velocity_setpoint(self, state, velocity):
+        return VehicleSetpoint(
+            position_local_enu=state.position_local_enu,
+            yaw_local_enu=state.yaw_local_enu,
+            velocity_local_enu=velocity,
+        )
+
+    def centralized_staged_setpoints(self, states, now_ns):
+        mission_state = self.mission_manager.state
+        leader_id = self.leader_manager.leader_id
+
+        if mission_state not in {
+            MissionState.LEADER_REPOSITION,
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
+        }:
+            return {}
+
+        if self.centralized_offsets is None:
+            if not self.capture_centralized_snapshot(states):
+                return {}
+
+        positions = self.central_world_positions(states)
+        if leader_id not in positions:
+            return {}
+
+        setpoints = {}
+        maximum_error = 0.0
+        maximum_speed = 0.0
+        zero = VectorENU(0.0, 0.0, 0.0)
+
+        command = self.active_centralized_command(now_ns)
+        leader_velocity = zero
+
+        if (
+            mission_state == MissionState.LEADER_REPOSITION
+            and command is not None
+            and command.command == FormationCommand.MOVE
+        ):
+            leader_velocity = VectorENU(
+                east=float(command.velocity_east),
+                north=float(command.velocity_north),
+                up=float(command.velocity_up),
+            )
+            leader_velocity = limit_vector(
+                leader_velocity,
+                self.tracking_max_speed,
+            )
+            leader_velocity = limit_velocity_near_fence(
+                positions[leader_id],
+                leader_velocity,
+                self.fence_config,
+            )
+
+        for vehicle_id, state in states.items():
+            if not state.position_valid or state.position_local_enu is None:
+                continue
+
+            if vehicle_id == leader_id:
+                velocity = leader_velocity
+            elif mission_state == MissionState.LEADER_REPOSITION:
+                velocity = zero
+            else:
+                target_world = add_vectors(
+                    positions[leader_id],
+                    self.centralized_offsets[vehicle_id],
+                )
+                current_world = positions.get(vehicle_id)
+                if current_world is None:
+                    continue
+
+                tracking_velocity = self.central_tracking_velocity(
+                    current_world,
+                    target_world,
+                )
+                avoidance_velocity = self.central_cpf_velocity(
+                    vehicle_id,
+                    positions,
+                )
+                velocity = limit_vector(
+                    add_cpf_vectors(
+                        tracking_velocity,
+                        avoidance_velocity,
+                    ),
+                    self.cpf_config.max_speed,
+                )
+                velocity = limit_velocity_near_fence(
+                    current_world,
+                    velocity,
+                    self.fence_config,
+                )
+                maximum_error = max(
+                    maximum_error,
+                    vector_distance(current_world, target_world),
+                )
+
+            maximum_speed = max(maximum_speed, self.vector_speed(velocity))
+            setpoints[vehicle_id] = self.make_velocity_setpoint(
+                state,
+                velocity,
+            )
+
+        self.centralized_maximum_position_error = maximum_error
+        self.centralized_maximum_speed = maximum_speed
+        self.update_centralized_formation_hold(now_ns)
+        return setpoints
+
+    def update_centralized_formation_hold(self, now_ns):
+        if self.mission_manager.state not in {
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
+        }:
+            self.centralized_formation_ready_since_ns = None
+            return
+
+        stable_now = bool(
+            self.centralized_maximum_position_error
+            <= self.formation_position_tolerance
+            and self.centralized_maximum_speed
+            <= self.formation_speed_tolerance
+        )
+
+        if not stable_now:
+            self.centralized_formation_ready_since_ns = None
+            return
+
+        if self.centralized_formation_ready_since_ns is None:
+            self.centralized_formation_ready_since_ns = now_ns
+            return
+
+        held_seconds = (
+            now_ns - self.centralized_formation_ready_since_ns
+        ) / 1e9
+
+        if held_seconds < self.formation_hold_duration:
+            return
+
+        if self.mission_manager.request_formation_hold():
+            self.get_logger().info(
+                'FORMATION COMPLETE: centralized formation is stable; '
+                'landing command may be sent'
+            )
+            self.formation_complete_reported = True
+
     def control_loop(self):
         states = {
             vehicle_id: vehicle.get_state()
@@ -455,13 +894,34 @@ class MissionNode(Node):
 
         leader_check = None
 
+        if self.mission_manager.state == MissionState.SNAPSHOT_FORMATION:
+            if self.capture_centralized_snapshot(states):
+                self.mission_manager.complete_snapshot()
+
         if self.mission_manager.state in {
             MissionState.WAITING_LEADER_COMMAND,
+            MissionState.LEADER_REPOSITION,
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
             MissionState.FORMATION,
         }:
             self.process_formation_command(now_ns)
 
-        if self.mission_manager.state == MissionState.FORMATION:
+        if (
+            self.control_mode == CONTROL_MODE_CENTRALIZED
+            and self.mission_manager.leader_reposition_done(now_ns)
+        ):
+            if self.mission_manager.request_followers_approach():
+                self.get_logger().info(
+                    'Leader reposition complete; followers approach started'
+                )
+
+        if self.mission_manager.state in {
+            MissionState.LEADER_REPOSITION,
+            MissionState.FOLLOWERS_APPROACH,
+            MissionState.FORMATION_HOLD,
+            MissionState.FORMATION,
+        }:
             flight_state_failure = (
                 self.required_flight_state_failure(states)
             )
@@ -513,11 +973,18 @@ class MissionNode(Node):
         should_check_safety = (
             self.mission_manager.state in {
                 MissionState.TAKEOFF,
+                MissionState.HOVER_STABILIZE,
+                MissionState.SNAPSHOT_FORMATION,
                 MissionState.WAITING_LEADER_COMMAND,
             }
             or (
                 self.mission_manager.state
-                == MissionState.FORMATION
+                in {
+                    MissionState.LEADER_REPOSITION,
+                    MissionState.FOLLOWERS_APPROACH,
+                    MissionState.FORMATION_HOLD,
+                    MissionState.FORMATION,
+                }
                 and (
                     leader_check is None
                     or leader_check.healthy
@@ -549,9 +1016,30 @@ class MissionNode(Node):
         )
 
         if (
+            self.control_mode == CONTROL_MODE_CENTRALIZED
+            and self.mission_manager.state in {
+                MissionState.LEADER_REPOSITION,
+                MissionState.FOLLOWERS_APPROACH,
+                MissionState.FORMATION_HOLD,
+            }
+        ):
+            staged_setpoints = self.centralized_staged_setpoints(
+                states,
+                now_ns,
+            )
+            if staged_setpoints:
+                output.publish_offboard = True
+                output.setpoints = staged_setpoints
+
+        if (
             self.mission_manager.state in {
                 MissionState.TAKEOFF,
+                MissionState.HOVER_STABILIZE,
+                MissionState.SNAPSHOT_FORMATION,
                 MissionState.WAITING_LEADER_COMMAND,
+                MissionState.LEADER_REPOSITION,
+                MissionState.FOLLOWERS_APPROACH,
+                MissionState.FORMATION_HOLD,
                 MissionState.FORMATION,
             }
             and output.setpoints
@@ -589,7 +1077,7 @@ class MissionNode(Node):
         #
         # Future leader_follower mode:
         #     leader_control_node will own leader setpoints and
-        #     follower_formation_node will own follower setpoints.
+        #     follower_control_node will own follower setpoints.
         skip_ground_heartbeat = (
             self.external_formation_controller_active()
         )
@@ -824,7 +1312,7 @@ class MissionNode(Node):
         ):
             return
 
-        self.follower_formation_ready = bool(
+        self.follower_control_ready = bool(
             message.formation_ready
         )
         self.follower_maximum_position_error = float(
@@ -832,7 +1320,7 @@ class MissionNode(Node):
         )
 
         if (
-            self.follower_formation_ready
+            self.follower_control_ready
             and not self.formation_complete_reported
             and self.mission_manager.state == MissionState.FORMATION
         ):
@@ -897,6 +1385,14 @@ class MissionNode(Node):
             now_ns - self.last_command_receive_ns
         ) / 1e9
         if age_seconds > self.command_timeout:
+            # Waiting for a leader command is not a fault.  It is a
+            # normal mission state after takeoff/snapshot.
+            if self.mission_manager.state in {
+                MissionState.WAITING_LEADER_COMMAND,
+                MissionState.FORMATION_HOLD,
+            }:
+                return
+
             if not self.command_timeout_reported:
                 reason = 'Formation command timeout'
                 if self.mission_manager.request_fault_landing(
@@ -918,22 +1414,6 @@ class MissionNode(Node):
                 )
             return
 
-        if (
-            self.mission_manager.state
-            == MissionState.WAITING_LEADER_COMMAND
-        ):
-            if command.command != FormationCommand.MOVE:
-                return
-
-            if self.mission_manager.request_start_formation():
-                self.follower_formation_ready = False
-                self.follower_maximum_position_error = 0.0
-                self.formation_complete_reported = False
-                self.get_logger().info(
-                    'Leader MOVE command received; starting FORMATION'
-                )
-            return
-
         if command.command == FormationCommand.EMERGENCY_STOP:
             reason = 'Emergency stop command received'
             if self.mission_manager.request_fault_landing(reason):
@@ -942,33 +1422,76 @@ class MissionNode(Node):
                 )
             return
 
-        if self.control_mode != 'centralized':
+        if self.control_mode == CONTROL_MODE_CENTRALIZED:
+            self.process_centralized_command(command, now_ns)
             return
 
-        if command.command == FormationCommand.MOVE:
-            velocity = VectorENU(
-                east=float(command.velocity_east),
-                north=float(command.velocity_north),
-                up=float(command.velocity_up),
-            )
-            self.controller.apply_velocity_command(
-                velocity_enu=velocity,
-                yaw_rate=float(command.yaw_rate),
-                dt_seconds=self.control_period,
-            )
-        elif command.command == FormationCommand.SET_YAW:
-            self.controller.set_reference_yaw(
-                float(command.yaw_enu)
-            )
+        if (
+            self.mission_manager.state
+            == MissionState.WAITING_LEADER_COMMAND
+        ):
+            if command.command != FormationCommand.MOVE:
+                return
+
+            if self.mission_manager.request_start_formation():
+                self.follower_control_ready = False
+                self.follower_maximum_position_error = 0.0
+                self.formation_complete_reported = False
+                self.get_logger().info(
+                    'Leader MOVE command received; starting FORMATION'
+                )
+            return
+
+        if self.control_mode != CONTROL_MODE_CENTRALIZED:
+            return
+
+    def process_centralized_command(self, command, now_ns):
+        if command.command != FormationCommand.MOVE:
+            return
+
+        if self.mission_manager.state not in {
+            MissionState.WAITING_LEADER_COMMAND,
+            MissionState.FORMATION_HOLD,
+        }:
+            return
+
+        sequence = self.command_sequence(command)
+        if self.centralized_active_move_sequence == sequence:
+            return
+
+        states = {
+            vehicle_id: vehicle.get_state()
+            for vehicle_id, vehicle in self.vehicles.items()
+        }
+        if not self.validate_centralized_move_command(states, command):
+            return
+
+        if not self.mission_manager.request_leader_reposition(
+            sequence=sequence,
+            duration=float(command.duration),
+            now_ns=now_ns,
+        ):
+            return
+
+        self.centralized_active_move_sequence = sequence
+        self.centralized_active_velocity = VectorENU(
+            east=float(command.velocity_east),
+            north=float(command.velocity_north),
+            up=float(command.velocity_up),
+        )
+        self.centralized_formation_ready_since_ns = None
+        self.formation_complete_reported = False
+
+        self.get_logger().info(
+            f'Leader MOVE sequence {sequence} accepted; '
+            'mission state entering LEADER_REPOSITION'
+        )
 
     def external_formation_controller_active(self):
         """Return True when another node owns FORMATION setpoints."""
 
         return (
-            self.control_mode in {
-                CONTROL_MODE_DISTRIBUTED,
-                CONTROL_MODE_LEADER_FOLLOWER,
-            }
+            self.control_mode == CONTROL_MODE_DISTRIBUTED
             and self.mission_manager.state == MissionState.FORMATION
         )
 
@@ -977,6 +1500,13 @@ class MissionNode(Node):
 
         response.success = self.mission_manager.request_takeoff()
         if response.success:
+            self.centralized_offsets = None
+            self.centralized_active_move_sequence = None
+            self.centralized_active_velocity = VectorENU(0.0, 0.0, 0.0)
+            self.centralized_maximum_position_error = 0.0
+            self.centralized_maximum_speed = 0.0
+            self.centralized_formation_ready_since_ns = None
+            self.formation_complete_reported = False
             self.log_takeoff_diagnostics('TAKEOFF REQUESTED')
 
         response.message = (
@@ -1012,15 +1542,30 @@ class MissionNode(Node):
             now_ns=now.nanoseconds,
             require_armed=(
                 self.mission_manager.state
-                == MissionState.FORMATION
+                in {
+                    MissionState.LEADER_REPOSITION,
+                    MissionState.FOLLOWERS_APPROACH,
+                    MissionState.FORMATION_HOLD,
+                    MissionState.FORMATION,
+                }
             ),
             require_offboard=(
                 self.mission_manager.state
-                == MissionState.FORMATION
+                in {
+                    MissionState.LEADER_REPOSITION,
+                    MissionState.FOLLOWERS_APPROACH,
+                    MissionState.FORMATION_HOLD,
+                    MissionState.FORMATION,
+                }
             ),
             require_preflight=(
                 self.mission_manager.state
-                != MissionState.FORMATION
+                not in {
+                    MissionState.LEADER_REPOSITION,
+                    MissionState.FOLLOWERS_APPROACH,
+                    MissionState.FORMATION_HOLD,
+                    MissionState.FORMATION,
+                }
             ),
         )
 
@@ -1033,14 +1578,25 @@ class MissionNode(Node):
         message.control_mode = self.control_mode
         message.formation_type = self.formation_type
         message.spacing = float(self.formation_spacing)
-        if self.control_mode == CONTROL_MODE_LEADER_FOLLOWER:
+        if self.control_mode == CONTROL_MODE_CENTRALIZED:
+            maximum_position_error = (
+                self.centralized_maximum_position_error
+            )
+            message.formation_ready = (
+                self.mission_manager.state
+                == MissionState.FORMATION_HOLD
+            )
+        elif self.control_mode == CONTROL_MODE_LEADER_FOLLOWER:
             maximum_position_error = (
                 self.follower_maximum_position_error
             )
             message.formation_ready = (
                 self.mission_manager.state
-                == MissionState.FORMATION
-                and self.follower_formation_ready
+                in {
+                    MissionState.FORMATION_HOLD,
+                    MissionState.FORMATION,
+                }
+                and self.follower_control_ready
             )
         else:
             maximum_position_error = float(
@@ -1051,8 +1607,7 @@ class MissionNode(Node):
                 )
             )
             message.formation_ready = (
-                self.mission_manager.state
-                == MissionState.FORMATION
+                self.mission_manager.state == MissionState.FORMATION
                 and maximum_position_error
                 <= self.formation_position_tolerance
             )
@@ -1142,6 +1697,12 @@ class MissionNode(Node):
             leader_id=leader_id,
             available_ids=set(self.vehicles),
         )
+        if response.success:
+            self.centralized_offsets = None
+            self.centralized_active_move_sequence = None
+            self.centralized_formation_ready_since_ns = None
+            self.formation_complete_reported = False
+
         response.message = (
             f'Leader set to vehicle {leader_id}'
             if response.success

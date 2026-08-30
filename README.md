@@ -2,7 +2,7 @@
 
 ROS 2 Humble package for PX4/Gazebo multi-UAV formation control.
 
-This package is designed for three PX4 UAVs named `MAV1`, `MAV2`, and `MAV3`. It currently supports synchronized takeoff/landing, leader-follower formation control, leader command relay, ENU/NED coordinate conversion, CPF velocity-based collision avoidance, and mission-level safety checks.
+This package is designed for three PX4 UAVs named `MAV1`, `MAV2`, and `MAV3`. It currently supports synchronized takeoff/landing, leader-follower control control, leader command relay, ENU/NED coordinate conversion, CPF velocity-based collision avoidance, and mission-level safety checks.
 
 The current main workflow is:
 
@@ -16,7 +16,7 @@ leader_command_node
 leader_control_node
     controls only the leader during FORMATION
 
-follower_formation_node
+follower_control_node
     controls follower UAVs relative to the latest leader position
 ```
 
@@ -26,7 +26,7 @@ follower_formation_node
 - Takeoff stabilization with Offboard/Arm retry, armed barrier, and altitude ramp
 - Takeoff diagnostics with PX4 failsafe flags, health report, and command ack summary
 - PX4 Offboard control through `px4_msgs`
-- Leader-follower formation mode
+- Leader-follower control mode
 - Centralized and distributed control code kept for development/extension
 - Leader movement command through `/formation/leader_input`
 - Leader selection service
@@ -61,8 +61,8 @@ formation/
 │   ├── mission_real.yaml
 │   ├── leader_command.yaml
 │   ├── leader_control.yaml
-│   ├── follower_formation.yaml
-│   ├── follower_formation_real.yaml
+│   ├── follower_control.yaml
+│   ├── follower_control_real.yaml
 │   ├── distributed.yaml
 │   └── formation.yaml
 ├── docs/
@@ -73,7 +73,7 @@ formation/
 │   ├── vehicle_interface.py
 │   ├── leader_command_node.py
 │   ├── leader_control_node.py
-│   ├── follower_formation_node.py
+│   ├── follower_control_node.py
 │   ├── distributed_vehicle_node.py
 │   ├── formation_controller.py
 │   ├── formation_shapes.py
@@ -93,7 +93,7 @@ formation/
 │   ├── mission_node
 │   ├── leader_command_node
 │   ├── leader_control_node
-│   ├── follower_formation_node
+│   ├── follower_control_node
 │   ├── formation_node
 │   ├── distributed_vehicle_node
 │   └── monitor_mav_dds.sh
@@ -182,7 +182,7 @@ By default, the launch file uses `leader_follower` mode and starts:
 mission_node
 leader_command_node
 leader_control_node
-follower_formation_node
+follower_control_node
 ```
 
 You can also pass the mode explicitly:
@@ -210,7 +210,7 @@ This launch file reuses the same node graph as `formation.launch.py`, but loads 
 
 ```text
 config/mission_real.yaml
-config/follower_formation_real.yaml
+config/follower_control_real.yaml
 ```
 
 The real profile assumes PX4 `vehicle_local_position_v1` is already in a shared external-vision / OptiTrack coordinate frame. Therefore `vehicle_origins_enu` is set to zero offsets:
@@ -223,7 +223,7 @@ vehicle_origins_enu: [
 ]
 ```
 
-The Gazebo profile keeps the original spawn offsets in `mission.yaml` and `follower_formation.yaml`.
+The Gazebo profile keeps the original spawn offsets in `mission.yaml` and `follower_control.yaml`.
 
 ## Mission flow
 
@@ -257,7 +257,7 @@ During `FORMATION`:
 
 - `mission_node` stops publishing formation-stage setpoints.
 - `leader_control_node` controls the leader.
-- `follower_formation_node` controls the follower UAVs.
+- `follower_control_node` controls the follower UAVs.
 
 This avoids multiple nodes sending competing Offboard setpoints to the same PX4 instance.
 
@@ -447,7 +447,7 @@ The follower node resets slot assignment when the leader, shape, or spacing chan
 
 ## Formation complete
 
-`follower_formation_node` publishes formation readiness through:
+`follower_control_node` publishes formation readiness through:
 
 ```text
 /formation/follower_status
@@ -485,7 +485,7 @@ The main configuration is split into smaller files:
 config/mission.yaml
 config/leader_command.yaml
 config/leader_control.yaml
-config/follower_formation.yaml
+config/follower_control.yaml
 config/distributed.yaml
 ```
 
@@ -532,7 +532,7 @@ takeoff_climb_rate:
     Maximum altitude setpoint ramp rate in m/s after liftoff is authorized.
 ```
 
-Important follower formation parameters:
+Important follower control parameters:
 
 ```yaml
 formation_position_tolerance: 0.5
@@ -585,7 +585,7 @@ y = north
 z = up
 ```
 
-`SafetyManager` uses the rectangular fence to detect out-of-bounds states and setpoints. `leader_control_node` and `follower_formation_node` also apply velocity braking near fence boundaries so commands slow down before reaching the wall.
+`SafetyManager` uses the rectangular fence to detect out-of-bounds states and setpoints. `leader_control_node` and `follower_control_node` also apply velocity braking near fence boundaries so commands slow down before reaching the wall.
 
 For Gazebo profiles, `fence_enabled` is currently false by default because the simulation spawn offsets and takeoff altitude may exceed the small real-flight room fence. For real-flight profiles, `fence_enabled` is true.
 
@@ -681,7 +681,7 @@ These notes explain each source file, configuration file, launch file, msg, and 
 ## Notes
 
 - Do not run multiple Offboard controllers for the same PX4 instance at the same time.
-- In leader-follower mode, `mission_node` owns takeoff/landing, while `leader_control_node` and `follower_formation_node` own formation-stage movement.
+- In leader-follower mode, `mission_node` owns takeoff/landing, while `leader_control_node` and `follower_control_node` own formation-stage movement.
 - If Gazebo reports the vehicle is flying but the model does not move, check PX4 `gz_bridge`, Gazebo physics state, and motor command topics.
 - If `/formation/takeoff` succeeds but the mission stays in `WAITING_READY`, check PX4 preflight, local position, DDS topics, Micro XRCE-DDS Agent connection, and the printed takeoff diagnostics.
 - If RC/manual arming works but ROS takeoff does not, check `vehicle_command_ack`: PX4 may be rejecting Offboard mode or external arm commands even though manual arming is allowed.
@@ -694,7 +694,7 @@ Current updates:
 - `formation.launch.py` can now accept external parameter files through launch arguments.
 - Added `formation_real.launch.py` for real-world testing.
 - Added `mission_real.yaml` for real-flight mission parameters.
-- Added `follower_formation_real.yaml` for real-flight follower formation parameters.
+- Added `follower_control_real.yaml` for real-flight follower control parameters.
 - Real-flight YAML sets `vehicle_origins_enu` to zero, assuming PX4 local position is already in the shared OptiTrack / external-vision frame.
 - Gazebo simulation keeps the original YAML files and spawn-origin offsets.
 - Added Offboard/Arm retry logging for multi-PX4 startup reliability.
@@ -708,11 +708,11 @@ Current updates:
   - Subscribe to `/MAV1/fmu/out/manual_control_setpoint` or configurable leader RC topic.
   - Convert RC pitch / roll / yaw input into `formation/msg/FormationCommand`.
   - Publish commands to `/formation/leader_input`.
-  - Reuse the existing `leader_command_node -> leader_control_node -> follower_formation_node` pipeline.
+  - Reuse the existing `leader_command_node -> leader_control_node -> follower_control_node` pipeline.
   - Keep RC teleoperation as an optional real-flight feature, not enabled by default in the Gazebo launch.
 - Add real-world OptiTrack bridge implementation after validating PX4 EKF2 external-vision parameters.
 - Add position plausibility filtering similar to the C++ staged-testing node, for rejecting mocap/EKF jumps before they affect formation or fence calculations.
-- Later split `follower_formation_node` into per-vehicle `follower_vehicle_node` for true distributed onboard execution.
+- Later split `follower_control_node` into per-vehicle `follower_vehicle_node` for true distributed onboard execution.
 
 ## License
 

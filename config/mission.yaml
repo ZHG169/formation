@@ -1,17 +1,19 @@
 mission_node:
   ros__parameters:
     control_frequency: 50.0
-    control_mode: leader_follower
+    control_mode: centralized
 
     leader_id: 1
 
     formation_type: column
     formation_spacing: 1.2
-    takeoff_height: 3.0
+    takeoff_height: 0.5
     # Takeoff stabilization. Vehicles arm/offboard first, hold ground
     # height, then climb together with a ramp.
     liftoff_after_arm_timeout: 10.0
     takeoff_climb_rate: 0.25
+    hover_stabilize_duration: 1.0
+    leader_stabilize_duration: 1.0
 
     # legacy reference mode parameters. leader_follower mode does not
     # use formation_reference_enu as the formation anchor.
@@ -40,10 +42,12 @@ mission_node:
     leader_failure_hold_duration: 1.0
     land_command_interval: 1.0
 
+    # Gazebo spawn positions in shared World ENU.
+    # Keep these values matched with launch/multi_PX4.launch.py.
     vehicle_origins_enu: [
       0.0, 0.0, 0.0,
-      2.0, 0.0, 0.0,
-      0.0, 2.0, 0.0
+      0.0, -0.9, 0.0,
+      0.0, 0.9, 0.0
     ]
 
     minimum_vehicle_distance: 0.8
@@ -52,11 +56,27 @@ mission_node:
     geofence_radius: 50.0
     maximum_setpoint_jump: 6.0
     formation_position_tolerance: 0.2
+    formation_speed_tolerance: 0.15
+    formation_hold_duration: 2.0
+    formation_footprint_margin: 0.1
 
+    # Centralized staged velocity controller.
+    tracking_kp: 0.8
+    tracking_max_speed: 0.5
+    tracking_deadband: 0.03
+
+    # CPF only handles UAV-UAV avoidance during follower approach.
+    cpf_enabled: true
+    cpf_attraction_gain: 0.0
+    cpf_repulsion_gain: 0.6
+    cpf_safe_distance: 1.0
+    cpf_influence_distance: 1.3
+    cpf_max_speed: 0.5
+    cpf_output_velocity: true
 
     # Rectangular world fence in ROS ENU frame.
     # x=east, y=north, z=up.
-    fence_enabled: false
+    fence_enabled: true
     fence_world_x_min: -1.7
     fence_world_x_max: 1.7
     fence_world_y_min: -1.5

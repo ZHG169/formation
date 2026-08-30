@@ -1,7 +1,7 @@
 mission_node:
   ros__parameters:
     control_frequency: 50.0
-    control_mode: leader_follower
+    control_mode: centralized
 
     leader_id: 1
 
@@ -12,6 +12,8 @@ mission_node:
     # height, then climb together with a ramp.
     liftoff_after_arm_timeout: 10.0
     takeoff_climb_rate: 0.25
+    hover_stabilize_duration: 1.0
+    leader_stabilize_duration: 1.0
 
     # legacy reference mode parameters. leader_follower mode does not
     # use formation_reference_enu as the formation anchor.
@@ -56,7 +58,23 @@ mission_node:
     geofence_radius: 50.0
     maximum_setpoint_jump: 6.0
     formation_position_tolerance: 0.2
+    formation_speed_tolerance: 0.15
+    formation_hold_duration: 2.0
+    formation_footprint_margin: 0.1
 
+    # Centralized staged velocity controller.
+    tracking_kp: 0.8
+    tracking_max_speed: 0.5
+    tracking_deadband: 0.03
+
+    # CPF only handles UAV-UAV avoidance during follower approach.
+    cpf_enabled: true
+    cpf_attraction_gain: 0.0
+    cpf_repulsion_gain: 0.6
+    cpf_safe_distance: 1.0
+    cpf_influence_distance: 1.3
+    cpf_max_speed: 0.5
+    cpf_output_velocity: true
 
     # Rectangular world fence in ROS ENU frame.
     # x=east, y=north, z=up.

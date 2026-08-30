@@ -1,4 +1,4 @@
-follower_formation_node:
+follower_control_node:
   ros__parameters:
     control_frequency: 50.0
     leader_id: 1
@@ -30,10 +30,12 @@ follower_formation_node:
       - 2
       - 3
 
+    # Gazebo spawn positions in shared World ENU.
+    # Keep these values matched with launch/multi_PX4.launch.py.
     vehicle_origins_enu: [
       0.0, 0.0, 0.0,
-      2.0, 0.0, 0.0,
-      0.0, 2.0, 0.0
+      0.0, -0.9, 0.0,
+      0.0, 0.9, 0.0
     ]
 
     cpf_enabled: true
@@ -46,7 +48,7 @@ follower_formation_node:
 
 
     # Rectangular world fence in ROS ENU frame.
-    fence_enabled: false
+    fence_enabled: true
     fence_world_x_min: -1.7
     fence_world_x_max: 1.7
     fence_world_y_min: -1.5

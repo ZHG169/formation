@@ -1,0 +1,121 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="formation_test">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure"/>
+
+    <scene>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.8 0.8 0.8 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.35 0.35 0.35 1</ambient>
+            <diffuse>0.45 0.45 0.45 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Visual rectangular fence matching mission.yaml:
+         x/east: -1.7 ~ 1.7, y/north: -1.5 ~ 1.5. -->
+    <model name="fence_x_min_red">
+      <static>true</static>
+      <pose>-1.7 0 0.03 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.04 3.0 0.06</size></box></geometry>
+          <material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="fence_x_max_red">
+      <static>true</static>
+      <pose>1.7 0 0.03 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.04 3.0 0.06</size></box></geometry>
+          <material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="fence_y_min_blue">
+      <static>true</static>
+      <pose>0 -1.5 0.03 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>3.4 0.04 0.06</size></box></geometry>
+          <material><ambient>0 0.1 1 1</ambient><diffuse>0 0.1 1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="fence_y_max_blue">
+      <static>true</static>
+      <pose>0 1.5 0.03 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>3.4 0.04 0.06</size></box></geometry>
+          <material><ambient>0 0.1 1 1</ambient><diffuse>0 0.1 1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Spawn reference markers. Yellow=center leader, green=followers. -->
+    <model name="spawn_marker_mav1">
+      <static>true</static>
+      <pose>0 0 0.011 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><cylinder><radius>0.08</radius><length>0.02</length></cylinder></geometry><material><ambient>1 1 0 1</ambient><diffuse>1 1 0 1</diffuse></material></visual></link>
+    </model>
+    <model name="spawn_marker_mav2">
+      <static>true</static>
+      <pose>0 -0.9 0.011 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><cylinder><radius>0.08</radius><length>0.02</length></cylinder></geometry><material><ambient>0 1 0 1</ambient><diffuse>0 1 0 1</diffuse></material></visual></link>
+    </model>
+    <model name="spawn_marker_mav3">
+      <static>true</static>
+      <pose>0 0.9 0.011 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><cylinder><radius>0.08</radius><length>0.02</length></cylinder></geometry><material><ambient>0 1 0 1</ambient><diffuse>0 1 0 1</diffuse></material></visual></link>
+    </model>
+  </world>
+</sdf>
